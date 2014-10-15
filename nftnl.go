@@ -97,16 +97,22 @@ func (t *Table) GetName(name string) (err error) {
 			C.NLM_F_DUMP,
 			(C.uint32_t)(seq))
 	}
+	if nlh == nil {
+		err = fmt.Errorf("nft_table_nlmsg_build_hdr")
+		return
+	}
 
 	nl := C.mnl_socket_open(C.NETLINK_NETFILTER)
 	if nl == nil {
 		err = fmt.Errorf("mnl_socket_open")
 		return
 	}
+
 	if C.mnl_socket_bind(nl, 0, C.MNL_SOCKET_AUTOPID) < 0 {
 		err = fmt.Errorf("mnl_socket_bind")
 		return
 	}
+
 	portid := C.mnl_socket_get_portid(nl)
 
 	if C.mnl_socket_sendto(nl, unsafe.Pointer(nlh), (C.size_t)(nlh.nlmsg_len)) < 0 {
@@ -114,22 +120,27 @@ func (t *Table) GetName(name string) (err error) {
 		return
 	}
 
-	ret := C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
+	var n C.int
+	var sn C.ssize_t
+	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
 	outputType := uint32(C.NFT_OUTPUT_DEFAULT)
-	for ret > 0 {
-		ret = (C.ssize_t)(C.mnl_cb_run(
+	for sn > 0 {
+		//ret, err = (C.ssize_t)(C.mnl_cb_run(
+		n, err = C.mnl_cb_run(
 			unsafe.Pointer(&buf[0]),
-			(C.size_t)(ret),
+			(C.size_t)(sn),
 			(C.uint)(seq), portid,
 			(C.mnl_cb_t)(C.get_go_cb()),
-			unsafe.Pointer(&outputType)))
-		if ret <= 0 {
+			unsafe.Pointer(&outputType))
+		fmt.Printf("callback loop, ret %d, portid %d, outputType %d, err: %s\n", n, portid, outputType, err)
+		sn = (C.ssize_t)(n)
+		if sn <= 0 {
 			break
 		}
-		ret = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
+		sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
 	}
-	if ret == -1 {
-		err = fmt.Errorf("mnl_cb_run err %d", ret)
+	if sn == -1 {
+		err = fmt.Errorf("mnl_cb_run err %d", sn)
 		return
 	}
 	C.mnl_socket_close(nl)

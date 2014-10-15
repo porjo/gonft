@@ -21,27 +21,25 @@ import "C"
 func go_callback(nlh *C.struct_nlmsghdr, outputType unsafe.Pointer) int {
 	fmt.Printf("callback enter\n")
 
-	buf := make([]byte, 4096)
-
 	t := NewTable()
 	defer t.Close()
-	if t == nil {
-		return C.MNL_CB_OK
-	}
 
 	if C.nft_table_nlmsg_parse(nlh, t.table) < 0 {
 		return C.MNL_CB_OK
 	}
 
-	//fmt.Printf("buf %v", buf)
+	//fmt.Printf("table %s %s flags %v use %d", t.table.name, t.table.family,
+	//	t.table.table_flags, t.table.use)
+	fmt.Printf("table %#v", t.table)
 
-	C.nft_table_snprintf(
-		(*C.char)(unsafe.Pointer(&buf[0])),
-		(C.size_t)(len(buf)),
-		t.table,
-		*(*C.uint32_t)(outputType),
-		0)
-	fmt.Printf("callback buf %s\n", buf)
+	/*
+		C.nft_table_snprintf(
+			(*C.char)(unsafe.Pointer(&buf[0])),
+			(C.size_t)(len(buf)),
+			t.table,
+			*(*C.uint32_t)(outputType),
+			0)
+	*/
 
 	return C.MNL_CB_OK
 }
