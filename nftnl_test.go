@@ -14,11 +14,14 @@ func TestNewTable(t *testing.T) {
 		t.Fatalf("Expected non-nil result")
 	}
 
-	table.Close()
-
+	//table.Close()
 }
 
 func TestGetName(t *testing.T) {
 
-	table.GetName("blah")
+	//err := table.GetName("blah")
+	err := table.GetName("")
+	if err != nil {
+		t.Fatal(err)
+	}
 }
