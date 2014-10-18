@@ -48,7 +48,7 @@ func go_table_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 		(*C.char)(unsafe.Pointer(&buf[0])),
 		4096,
 		t,
-		(C.uint32_t)(outputType),
+		C.uint32_t(outputType),
 		0)
 
 	jtable := jsonTable{}
@@ -84,7 +84,7 @@ func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 		(*C.char)(unsafe.Pointer(&buf[0])),
 		4096,
 		r,
-		(C.uint32_t)(outputType),
+		C.uint32_t(outputType),
 		0)
 
 	jrule := jsonRule{}

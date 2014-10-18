@@ -114,7 +114,7 @@ func getTable(name, family string) (tables []*Table, err error) {
 		nlh = C.nft_table_nlmsg_build_hdr(
 			(*C.char)(unsafe.Pointer(&buf[0])),
 			C.uint16_t(C.enum_nf_tables_msg_types(C.NFT_MSG_GETTABLE)),
-			(C.uint16_t)(f),
+			C.uint16_t(f),
 			C.NLM_F_ACK,
 			C.uint32_t(seq))
 
@@ -126,7 +126,7 @@ func getTable(name, family string) (tables []*Table, err error) {
 		nlh = C.nft_table_nlmsg_build_hdr(
 			(*C.char)(unsafe.Pointer(&buf[0])),
 			C.uint16_t(C.enum_nf_tables_msg_types(C.NFT_MSG_GETTABLE)),
-			(C.uint16_t)(f),
+			C.uint16_t(f),
 			C.NLM_F_DUMP,
 			C.uint32_t(seq))
 	}
@@ -148,7 +148,7 @@ func getTable(name, family string) (tables []*Table, err error) {
 
 	portid := C.mnl_socket_get_portid(nl)
 
-	if C.mnl_socket_sendto(nl, unsafe.Pointer(nlh), (C.size_t)(nlh.nlmsg_len)) < 0 {
+	if C.mnl_socket_sendto(nl, unsafe.Pointer(nlh), C.size_t(nlh.nlmsg_len)) < 0 {
 		err = fmt.Errorf("mnl_socket_send")
 		return
 	}
@@ -156,7 +156,7 @@ func getTable(name, family string) (tables []*Table, err error) {
 	var cerr error
 	var n C.int
 	var sn C.ssize_t
-	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
+	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	tablech := make(tableChan)
 
 	readyCh := make(chan bool, 1)

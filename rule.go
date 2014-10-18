@@ -121,7 +121,7 @@ func getRule(chain, family string) (rules []*Rule, err error) {
 	nlh := C.nft_rule_nlmsg_build_hdr(
 		(*C.char)(unsafe.Pointer(&buf[0])),
 		C.uint16_t(C.enum_nf_tables_msg_types(C.NFT_MSG_GETRULE)),
-		(C.uint16_t)(f),
+		C.uint16_t(f),
 		C.NLM_F_DUMP,
 		C.uint32_t(seq))
 
@@ -148,12 +148,12 @@ func getRule(chain, family string) (rules []*Rule, err error) {
 
 	portid := C.mnl_socket_get_portid(nl)
 
-	if C.mnl_socket_sendto(nl, unsafe.Pointer(nlh), (C.size_t)(nlh.nlmsg_len)) < 0 {
+	if C.mnl_socket_sendto(nl, unsafe.Pointer(nlh), C.size_t(nlh.nlmsg_len)) < 0 {
 		err = fmt.Errorf("mnl_socket_sendto")
 		return
 	}
 
-	sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
+	sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	if sn == -1 {
 		err = fmt.Errorf("mnl_socket_recvfrom: err %s", cerr)
 		return
@@ -192,7 +192,7 @@ func getRule(chain, family string) (rules []*Rule, err error) {
 		if sn <= 0 {
 			break
 		}
-		sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
+		sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	}
 
 	close(rulech)
@@ -244,7 +244,7 @@ func (r *Rule) Add() (err error) {
 	buf := make([]byte, bufsize)
 	batch := C.mnl_nlmsg_batch_start(
 		unsafe.Pointer(&buf[0]),
-		(C.size_t)(len(buf)),
+		C.size_t(len(buf)),
 	)
 
 	C.mnl_nlmsg_batch_next(batch)
@@ -253,12 +253,12 @@ func (r *Rule) Add() (err error) {
 	nlh := C.nft_rule_nlmsg_build_hdr(
 		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
 		C.NFT_MSG_NEWRULE,
-		(C.uint16_t)(C.nft_rule_attr_get_u32(
+		C.uint16_t(C.nft_rule_attr_get_u32(
 			r.rule,
 			C.NFT_RULE_ATTR_FAMILY,
 		)),
 		C.NLM_F_APPEND|C.NLM_F_CREATE|C.NLM_F_ACK,
-		(C.uint32_t)(seq),
+		C.uint32_t(seq),
 	)
 
 	C.nft_rule_nlmsg_build_payload(nlh, r.rule)
@@ -275,7 +275,7 @@ func (r *Rule) Add() (err error) {
 	sn, cerr = C.mnl_socket_sendto(
 		nl,
 		unsafe.Pointer(C.mnl_nlmsg_batch_head(batch)),
-		(C.size_t)(C.mnl_nlmsg_batch_size(batch)),
+		C.size_t(C.mnl_nlmsg_batch_size(batch)),
 	)
 	if sn < 0 {
 		err = fmt.Errorf("mnl_socket_sendto: err %s", cerr)
@@ -284,7 +284,7 @@ func (r *Rule) Add() (err error) {
 
 	C.mnl_nlmsg_batch_stop(batch)
 
-	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), (C.size_t)(len(buf)))
+	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	if sn == -1 {
 		err = fmt.Errorf("mnl_socket_recvfrom")
 		return
@@ -352,7 +352,7 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 		C.nft_rule_attr_set_u32(
 			r.rule,
 			C.NFT_RULE_ATTR_FAMILY,
-			(C.uint32_t)(f),
+			C.uint32_t(f),
 		)
 	} else {
 		err = fmt.Errorf("unrecognised family %s", r.Family)
@@ -362,7 +362,7 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 		C.nft_rule_attr_set_u64(
 			r.rule,
 			C.NFT_RULE_ATTR_POSITION,
-			(C.uint64_t)(r.Handle),
+			C.uint64_t(r.Handle),
 		)
 	}
 
@@ -389,7 +389,7 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 	}
 
 	var tcphdr C.struct_tcphdr
-	dport := C.htons((C.uint16_t)(port))
+	dport := C.htons(C.uint16_t(port))
 	err = r.addPayload(
 		int(C.NFT_PAYLOAD_TRANSPORT_HEADER),
 		int(C.NFT_REG_1),
@@ -431,19 +431,19 @@ func (r *Rule) addCmp(sreg, op int, data int, length uintptr) (err error) {
 	C.nft_rule_expr_set_u32(
 		e,
 		C.NFT_EXPR_CMP_SREG,
-		(C.uint32_t)(sreg),
+		C.uint32_t(sreg),
 	)
 	C.nft_rule_expr_set_u32(
 		e,
 		C.NFT_EXPR_CMP_OP,
-		(C.uint32_t)(op),
+		C.uint32_t(op),
 	)
 
 	C.nft_rule_expr_set(
 		e,
 		C.NFT_EXPR_CMP_DATA,
 		unsafe.Pointer(&data),
-		(C.uint32_t)(length),
+		C.uint32_t(length),
 	)
 
 	C.nft_rule_add_expr(r.rule, e)
@@ -465,22 +465,22 @@ func (r *Rule) addPayload(base, dreg int, offset, length uintptr) (err error) {
 	C.nft_rule_expr_set_u32(
 		e,
 		C.NFT_EXPR_PAYLOAD_BASE,
-		(C.uint32_t)(base),
+		C.uint32_t(base),
 	)
 	C.nft_rule_expr_set_u32(
 		e,
 		C.NFT_EXPR_PAYLOAD_DREG,
-		(C.uint32_t)(dreg),
+		C.uint32_t(dreg),
 	)
 	C.nft_rule_expr_set_u32(
 		e,
 		C.NFT_EXPR_PAYLOAD_OFFSET,
-		(C.uint32_t)(offset),
+		C.uint32_t(offset),
 	)
 	C.nft_rule_expr_set_u32(
 		e,
 		C.NFT_EXPR_PAYLOAD_LEN,
-		(C.uint32_t)(length),
+		C.uint32_t(length),
 	)
 
 	C.nft_rule_add_expr(r.rule, e)
@@ -510,14 +510,14 @@ func batchPut(buf *C.char, msgType uint16, seq int64) {
 	nlh := C.mnl_nlmsg_put_header(
 		unsafe.Pointer(buf),
 	)
-	nlh.nlmsg_type = (C.__u16)(msgType)
+	nlh.nlmsg_type = C.__u16(msgType)
 	nlh.nlmsg_flags = C.NLM_F_REQUEST
-	nlh.nlmsg_seq = (C.__u32)(seq)
+	nlh.nlmsg_seq = C.__u32(seq)
 
 	var nfg *C.struct_nfgenmsg
 	nfgPtr := C.mnl_nlmsg_put_extra_header(
 		nlh,
-		(C.size_t)(unsafe.Sizeof(*nfg)),
+		C.size_t(unsafe.Sizeof(*nfg)),
 	)
 	nfg = (*C.struct_nfgenmsg)(nfgPtr)
 	nfg.nfgen_family = C.AF_INET
