@@ -26,6 +26,8 @@ import (
 )
 
 /*
+#cgo linux LDFLAGS: -lnftnl -lmnl
+
 #include <netinet/in.h>
 
 #include <linux/netfilter.h>

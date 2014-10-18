@@ -25,8 +25,6 @@ import (
 )
 
 /*
-#cgo linux LDFLAGS: -lnftnl -lmnl
-
 #include <stdlib.h>
 #include <netinet/in.h>
 
@@ -184,7 +182,8 @@ func getTable(name, family string) (tables []*Table, err error) {
 		n, cerr = C.mnl_cb_run(
 			unsafe.Pointer(&buf[0]),
 			C.size_t(sn),
-			C.uint(seq), portid,
+			C.uint(seq),
+			portid,
 			C.mnl_cb_t(C.get_go_table_cb()),
 			unsafe.Pointer(&tablech))
 

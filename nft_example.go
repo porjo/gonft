@@ -37,7 +37,10 @@ func main() {
 		log.Printf("table %s returned", table)
 	}
 
-	rules, err := nft.GetRules("input")
+	chain := nft.Chain{}
+	chain.Name = "input"
+
+	rules, err := chain.GetRules()
 	if err != nil {
 		log.Fatalf("GetRules err %s", err)
 	}
@@ -48,5 +51,15 @@ func main() {
 			log.Printf("rule %s returned", r)
 			log.Printf("rule %#v", r)
 		}
+	}
+
+	rule := nft.Rule{}
+	rule.Table = "filter"
+	rule.Chain = "input"
+	rule.Family = "ip4"
+
+	err = rule.Add()
+	if err != nil {
+		log.Fatalf("Rule Add err %s", err)
 	}
 }
