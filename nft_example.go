@@ -14,7 +14,7 @@ func main() {
 
 	tables, err := nft.GetTables()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("GetTables err %s", err)
 	}
 
 	if len(tables) == 0 {
@@ -26,9 +26,9 @@ func main() {
 		}
 	}
 
-	table, err := nft.GetTable("filter")
+	table, err := nft.GetTable("filter", "ip6")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("GetTable err %s", err)
 	}
 
 	if table == nil {
@@ -39,7 +39,7 @@ func main() {
 
 	rules, err := nft.GetRules("input")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("GetRules err %s", err)
 	}
 	if len(rules) == 0 {
 		log.Printf("no rules returned")

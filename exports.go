@@ -17,13 +17,14 @@
 package nft
 
 import (
-	//	"fmt"
 	"encoding/json"
+	"log"
 	"strings"
 	"unsafe"
 )
 
 /*
+#include <stdlib.h>
 #include <netinet/in.h>
 
 #include <libmnl/libmnl.h>
@@ -34,10 +35,10 @@ import "C"
 
 //export go_table_callback
 func go_table_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
-	t := &Table{}
-	t.table = C.nft_table_alloc()
+	t := C.nft_table_alloc()
+	defer C.free(unsafe.Pointer(t))
 
-	if C.nft_table_nlmsg_parse(nlh, t.table) < 0 {
+	if C.nft_table_nlmsg_parse(nlh, t) < 0 {
 		return C.MNL_CB_ERROR
 	}
 
@@ -46,7 +47,7 @@ func go_table_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 	C.nft_table_snprintf(
 		(*C.char)(unsafe.Pointer(&buf[0])),
 		4096,
-		t.table,
+		t,
 		(C.uint32_t)(outputType),
 		0)
 
@@ -68,10 +69,12 @@ func go_table_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 
 //export go_rule_callback
 func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
-	r := &Rule{}
-	r.rule = C.nft_rule_alloc()
 
-	if C.nft_rule_nlmsg_parse(nlh, r.rule) < 0 {
+	r := C.nft_rule_alloc()
+	defer C.free(unsafe.Pointer(r))
+
+	if n, cerr := C.nft_rule_nlmsg_parse(nlh, r); n < 0 {
+		log.Printf("nft_rule_nlmsg_parse err %s", cerr)
 		return C.MNL_CB_ERROR
 	}
 
@@ -80,7 +83,7 @@ func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 	C.nft_rule_snprintf(
 		(*C.char)(unsafe.Pointer(&buf[0])),
 		4096,
-		r.rule,
+		r,
 		(C.uint32_t)(outputType),
 		0)
 
@@ -89,6 +92,7 @@ func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 	buf = []byte(strings.TrimRight(jsonStr, "\x00"))
 	err := json.Unmarshal(buf, &jrule)
 	if err != nil {
+		log.Printf("json unmarshal error %s", err)
 		return C.MNL_CB_ERROR
 	}
 

@@ -14,11 +14,6 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-// Package gonftnl wraps libnftnl, providing a low-level netlink
-// programming interface (API) to the in-kernel nf_tables subsystem.
-//
-// gonftnl requires libnftnl, libmnl and a kernel that includes the nf_tables subsystem (initial support >= 3.14).
-//
 package nft
 
 import (
@@ -58,8 +53,6 @@ type Table struct {
 	Family string `json:"family"`
 	Use    uint32 `json:"use,omitempty"`
 	Flags  uint32 `json:"flags,omitempty"`
-
-	table *C.struct_nft_table
 }
 
 type tableChan chan *Table
@@ -69,25 +62,43 @@ func (t *Table) String() string {
 }
 
 // Get a table by name
-func GetTable(name string) (*Table, error) {
-	tables, err := getTable(name)
+func GetTable(name, family string) (table *Table, err error) {
+	tables, err := getTable(name, family)
+	if err != nil {
+		return
+	}
 
 	if len(tables) == 1 {
-		return tables[0], err
-	} else {
+		table = tables[0]
+		return
+	} else if len(tables) > 1 {
+		err = fmt.Errorf("Too many tables returned, got %d", len(tables))
 		return nil, err
 	}
+	return
 }
 
 // Get all tables
 func GetTables() ([]*Table, error) {
-	return getTable("")
+	return getTable("", "ip")
 }
 
-func getTable(name string) (tables []*Table, err error) {
+/*
+// Do we want separate functions for ip4 and ip6?
+func GetTables6() ([]*Table, error) {
+	return getTable("", "ip6")
+}
+*/
 
-	t := &Table{}
-	t.table = C.nft_table_alloc()
+func getTable(name, family string) (tables []*Table, err error) {
+	var f int
+	var ok bool
+	if f, ok = familyMap[family]; !ok {
+		err = fmt.Errorf("unrecognised family %s", family)
+		return
+	}
+	t := C.nft_table_alloc()
+	defer C.free(unsafe.Pointer(t))
 
 	seq := time.Time{}.Unix()
 
@@ -105,19 +116,19 @@ func getTable(name string) (tables []*Table, err error) {
 		nlh = C.nft_table_nlmsg_build_hdr(
 			(*C.char)(unsafe.Pointer(&buf[0])),
 			C.uint16_t(C.enum_nf_tables_msg_types(C.NFT_MSG_GETTABLE)),
-			C.NFPROTO_IPV4,
+			(C.uint16_t)(f),
 			C.NLM_F_ACK,
 			C.uint32_t(seq))
 
 		cstring := C.CString(name)
 		defer C.free(unsafe.Pointer(cstring))
-		C.nft_table_attr_set(t.table, C.NFT_TABLE_ATTR_NAME, unsafe.Pointer(cstring))
-		C.nft_table_nlmsg_build_payload(nlh, t.table)
+		C.nft_table_attr_set(t, C.NFT_TABLE_ATTR_NAME, unsafe.Pointer(cstring))
+		C.nft_table_nlmsg_build_payload(nlh, t)
 	} else {
 		nlh = C.nft_table_nlmsg_build_hdr(
 			(*C.char)(unsafe.Pointer(&buf[0])),
 			C.uint16_t(C.enum_nf_tables_msg_types(C.NFT_MSG_GETTABLE)),
-			C.NFPROTO_IPV4,
+			(C.uint16_t)(f),
 			C.NLM_F_DUMP,
 			C.uint32_t(seq))
 	}
@@ -188,7 +199,7 @@ func getTable(name string) (tables []*Table, err error) {
 	wg.Wait()
 
 	if sn == -1 {
-		err = fmt.Errorf("mnl_cb_run err %s", cerr)
+		err = fmt.Errorf("mnl_cb_run: %s", cerr)
 		return
 	}
 	C.mnl_socket_close(nl)
