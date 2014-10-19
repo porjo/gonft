@@ -35,7 +35,7 @@ import (
 import "C"
 
 var familyMap map[string]int
-var protoMap map[string]int
+var protoMap map[string]C.uint8_t
 
 func init() {
 	familyMap = make(map[string]int)
@@ -43,7 +43,7 @@ func init() {
 	familyMap["ip4"] = C.NFPROTO_IPV4
 	familyMap["ip6"] = C.NFPROTO_IPV6
 
-	protoMap = make(map[string]int)
+	protoMap = make(map[string]C.uint8_t)
 	protoMap["tcp"] = C.IPPROTO_TCP
 	protoMap["udp"] = C.IPPROTO_UDP
 }

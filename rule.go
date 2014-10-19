@@ -215,11 +215,11 @@ func (r *Rule) Add() (err error) {
 	var sn C.ssize_t
 
 	// addSetup allocs r.rule
-	defer C.free(unsafe.Pointer(r.rule))
 	err = r.addSetup("tcp", 22)
 	if err != nil {
 		return
 	}
+	defer C.free(unsafe.Pointer(r.rule))
 
 	nl := C.mnl_socket_open(C.NETLINK_NETFILTER)
 	if nl == nil {
@@ -247,6 +247,13 @@ func (r *Rule) Add() (err error) {
 		C.size_t(len(buf)),
 	)
 
+	seq++
+	batchPut(
+		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
+		uint16(C.NFNL_MSG_BATCH_BEGIN),
+		seq,
+	)
+
 	C.mnl_nlmsg_batch_next(batch)
 
 	seq++
@@ -261,7 +268,7 @@ func (r *Rule) Add() (err error) {
 		C.uint32_t(seq),
 	)
 
-	C.nft_rule_nlmsg_build_payload(nlh, r.rule)
+	C.nft_rule_nlmsg_build_payload(nlh, r.rule) //finished with r.rule, gets freed via defer
 	C.mnl_nlmsg_batch_next(batch)
 
 	seq++
@@ -277,7 +284,7 @@ func (r *Rule) Add() (err error) {
 		unsafe.Pointer(C.mnl_nlmsg_batch_head(batch)),
 		C.size_t(C.mnl_nlmsg_batch_size(batch)),
 	)
-	if sn < 0 {
+	if sn == -1 {
 		err = fmt.Errorf("mnl_socket_sendto: err %s", cerr)
 		return
 	}
@@ -292,7 +299,6 @@ func (r *Rule) Add() (err error) {
 
 	portid := C.mnl_socket_get_portid(nl)
 
-	fmt.Printf("buf %s, sn %d, portid %d", buf, sn, portid)
 	n, cerr = C.mnl_cb_run(
 		unsafe.Pointer(&buf[0]),
 		C.size_t(sn),
@@ -318,7 +324,7 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 		return
 	}
 
-	var proto int
+	var proto C.uint8_t
 	var ok bool
 	if proto, ok = protoMap[protoStr]; !ok {
 		err = fmt.Errorf("unrecognised protocol %s", protoStr)
@@ -372,7 +378,7 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 		int(C.NFT_PAYLOAD_NETWORK_HEADER),
 		int(C.NFT_REG_1),
 		unsafe.Offsetof(iphdr.protocol),
-		8,
+		1, // sizeof(uint8_t)
 	)
 	if err != nil {
 		return
@@ -381,8 +387,8 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 	err = r.addCmp(
 		int(C.NFT_REG_1),
 		int(C.NFT_CMP_EQ),
-		proto,
-		8,
+		&proto,
+		1, // sizeof(uint8_t)
 	)
 	if err != nil {
 		return
@@ -394,16 +400,17 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 		int(C.NFT_PAYLOAD_TRANSPORT_HEADER),
 		int(C.NFT_REG_1),
 		unsafe.Offsetof(tcphdr.dest),
-		16,
+		2, // sizeof(uint16_t)
 	)
 	if err != nil {
 		return
 	}
+
 	err = r.addCmp(
 		int(C.NFT_REG_1),
 		int(C.NFT_CMP_EQ),
-		int(dport),
-		16,
+		&dport,
+		2, // sizeof(uint16_t)
 	)
 	if err != nil {
 		return
@@ -417,7 +424,7 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 	return
 }
 
-func (r *Rule) addCmp(sreg, op int, data int, length uintptr) (err error) {
+func (r *Rule) addCmp(sreg, op int, data interface{}, length uintptr) (err error) {
 
 	ccmp := C.CString("cmp")
 	defer C.free(unsafe.Pointer(ccmp))
@@ -439,12 +446,34 @@ func (r *Rule) addCmp(sreg, op int, data int, length uintptr) (err error) {
 		C.uint32_t(op),
 	)
 
-	C.nft_rule_expr_set(
-		e,
-		C.NFT_EXPR_CMP_DATA,
-		unsafe.Pointer(&data),
-		C.uint32_t(length),
-	)
+	switch data.(type) {
+	case *C.uint8_t:
+		if proto, ok := data.(*C.uint8_t); ok {
+
+			C.nft_rule_expr_set(
+				e,
+				C.NFT_EXPR_CMP_DATA,
+				unsafe.Pointer(proto),
+				C.uint32_t(length),
+			)
+		} else {
+			err = fmt.Errorf("unable to assert *C.uint8_t")
+			return
+		}
+	case *C.uint16_t:
+		if port, ok := data.(*C.uint16_t); ok {
+
+			C.nft_rule_expr_set(
+				e,
+				C.NFT_EXPR_CMP_DATA,
+				unsafe.Pointer(port),
+				C.uint32_t(length),
+			)
+		} else {
+			err = fmt.Errorf("unable to assert *C.uint16_t")
+			return
+		}
+	}
 
 	C.nft_rule_add_expr(r.rule, e)
 
@@ -491,7 +520,7 @@ func (r *Rule) addPayload(base, dreg int, offset, length uintptr) (err error) {
 
 func (r *Rule) addCounter() (err error) {
 
-	ccounter := C.CString("payload")
+	ccounter := C.CString("counter")
 	defer C.free(unsafe.Pointer(ccounter))
 	// freed by libnftnl
 	e, cerr := C.nft_rule_expr_alloc(ccounter)
@@ -515,11 +544,12 @@ func batchPut(buf *C.char, msgType uint16, seq int64) {
 	nlh.nlmsg_seq = C.__u32(seq)
 
 	var nfg *C.struct_nfgenmsg
-	nfgPtr := C.mnl_nlmsg_put_extra_header(
-		nlh,
-		C.size_t(unsafe.Sizeof(*nfg)),
+	nfg = (*C.struct_nfgenmsg)(
+		C.mnl_nlmsg_put_extra_header(
+			nlh,
+			C.size_t(unsafe.Sizeof(*nfg)),
+		),
 	)
-	nfg = (*C.struct_nfgenmsg)(nfgPtr)
 	nfg.nfgen_family = C.AF_INET
 	nfg.version = C.NFNETLINK_V0
 	nfg.res_id = C.NFNL_SUBSYS_NFTABLES
