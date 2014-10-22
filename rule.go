@@ -18,8 +18,8 @@ package nft
 
 import (
 	//	"errors"
+	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 	"unsafe"
 )
@@ -81,9 +81,7 @@ type Expr struct {
 	} `json:"data_reg,omitempty"`
 }
 
-type ruleChan chan *Rule
-
-func (r *Rule) String() string {
+func (r Rule) String() string {
 	return fmt.Sprintf("%s %s %s %d %d", r.Family, r.Table, r.Chain, r.Handle, r.Position)
 }
 
@@ -93,7 +91,7 @@ func GetRules6(chain string) ([]*Rule, error) {
 }
 */
 
-func getRule(chain, family string) (rules []*Rule, err error) {
+func getRule(chain, family string) (rules []Rule, err error) {
 	var ok bool
 	var f, bufsize int
 	var cerr error
@@ -158,26 +156,6 @@ func getRule(chain, family string) (rules []*Rule, err error) {
 		err = fmt.Errorf("mnl_socket_recvfrom: err %s", cerr)
 		return
 	}
-	rulech := make(ruleChan)
-
-	readyCh := make(chan bool, 1)
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		readyCh <- true
-		for {
-			select {
-			case t, ok := <-rulech:
-				if ok {
-					rules = append(rules, t)
-				} else {
-					return
-				}
-			}
-		}
-	}()
-	<-readyCh
 
 	for sn > 0 {
 		n, cerr = C.mnl_cb_run(
@@ -186,7 +164,7 @@ func getRule(chain, family string) (rules []*Rule, err error) {
 			C.uint(seq),
 			portid,
 			C.mnl_cb_t(C.get_go_rule_cb()),
-			unsafe.Pointer(&rulech))
+			unsafe.Pointer(&rules))
 
 		sn = C.ssize_t(n)
 		if sn <= 0 {
@@ -194,9 +172,6 @@ func getRule(chain, family string) (rules []*Rule, err error) {
 		}
 		sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	}
-
-	close(rulech)
-	wg.Wait()
 
 	if sn == -1 {
 		err = fmt.Errorf("mnl_cb_run: err %s", cerr)
@@ -207,15 +182,58 @@ func getRule(chain, family string) (rules []*Rule, err error) {
 	return
 }
 
-func (r *Rule) Add() (err error) {
+func AddJson() (err error) {
+	var rules []Rule
+	rules, err = getRule("input", "ip4")
 
+	if len(rules) == 0 {
+		err = fmt.Errorf("no rules returned")
+		return
+	}
+
+	rule := rules[0]
+
+	for i, _ := range rule.Expr {
+		if rule.Expr[i].DataReg.Data0 == "0x00000006" { //tcp
+			rule.Expr[i].DataReg.Data0 = "0x00000011" //udp (hex)
+		}
+	}
+
+	var cerr error
+	var n C.int
+	var r *C.struct_nft_rule
+
+	r, cerr = C.nft_rule_alloc()
+	if r == nil {
+		err = fmt.Errorf("rule alloc failure: %s", cerr)
+		return
+	}
+	defer C.free(unsafe.Pointer(r))
+
+	var buf []byte
+	buf, err = json.Marshal(rule)
+
+	var parseErr C.struct_nft_parse_err
+	n, cerr = C.nft_rule_parse(
+		r,
+		C.enum_nft_parse_type(C.NFT_PARSE_JSON),
+		(*C.char)(unsafe.Pointer(&buf[0])),
+		&parseErr,
+	)
+
+	fmt.Printf("nft_rule_parse r %v, n %d, buf %s, parseErr %v, cerr %s\n", r, n, buf, parseErr, cerr)
+
+	return
+}
+
+func (r *Rule) Add() (err error) {
 	var cerr error
 	var bufsize int
 	var n C.int
 	var sn C.ssize_t
 
 	// addSetup allocs r.rule
-	err = r.addSetup("tcp", 22)
+	err = r.addSetup("tcp", 80)
 	if err != nil {
 		return
 	}
@@ -318,7 +336,6 @@ func (r *Rule) Add() (err error) {
 }
 
 func (r *Rule) addSetup(protoStr string, port int) (err error) {
-
 	if r.Table == "" || r.Chain == "" || r.Family == "" {
 		err = fmt.Errorf("table, chain, family missing. These must be set")
 		return
@@ -333,7 +350,6 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 	var cerr error
 
 	r.rule, cerr = C.nft_rule_alloc()
-
 	if r == nil {
 		err = fmt.Errorf("rule alloc failure: %s", cerr)
 		return
@@ -425,7 +441,6 @@ func (r *Rule) addSetup(protoStr string, port int) (err error) {
 }
 
 func (r *Rule) addCmp(sreg, op int, data interface{}, length uintptr) (err error) {
-
 	ccmp := C.CString("cmp")
 	defer C.free(unsafe.Pointer(ccmp))
 	// freed by libnftnl
@@ -481,7 +496,6 @@ func (r *Rule) addCmp(sreg, op int, data interface{}, length uintptr) (err error
 }
 
 func (r *Rule) addPayload(base, dreg int, offset, length uintptr) (err error) {
-
 	cpayload := C.CString("payload")
 	defer C.free(unsafe.Pointer(cpayload))
 	// freed by libnftnl
@@ -515,11 +529,9 @@ func (r *Rule) addPayload(base, dreg int, offset, length uintptr) (err error) {
 	C.nft_rule_add_expr(r.rule, e)
 
 	return
-
 }
 
 func (r *Rule) addCounter() (err error) {
-
 	ccounter := C.CString("counter")
 	defer C.free(unsafe.Pointer(ccounter))
 	// freed by libnftnl
@@ -535,7 +547,6 @@ func (r *Rule) addCounter() (err error) {
 }
 
 func batchPut(buf *C.char, msgType uint16, seq int64) {
-
 	nlh := C.mnl_nlmsg_put_header(
 		unsafe.Pointer(buf),
 	)

@@ -19,7 +19,6 @@ package nft
 import (
 	//	"errors"
 	"fmt"
-	"sync"
 	"time"
 	"unsafe"
 )
@@ -53,31 +52,30 @@ type Table struct {
 	Flags  uint32 `json:"flags,omitempty"`
 }
 
-type tableChan chan *Table
-
-func (t *Table) String() string {
+func (t Table) String() string {
 	return fmt.Sprintf("%s %s", t.Name, t.Family)
 }
 
 // Get a table by name
-func GetTable(name, family string) (table *Table, err error) {
+func GetTable(name, family string) (table Table, err error) {
 	tables, err := getTable(name, family)
 	if err != nil {
 		return
 	}
 
-	if len(tables) == 1 {
+	switch len(tables) {
+	case 0:
+		err = fmt.Errorf("No table found")
+	case 1:
 		table = tables[0]
-		return
-	} else if len(tables) > 1 {
+	default:
 		err = fmt.Errorf("Too many tables returned, got %d", len(tables))
-		return nil, err
 	}
 	return
 }
 
 // Get all tables
-func GetTables() ([]*Table, error) {
+func GetTables() ([]Table, error) {
 	return getTable("", "ip")
 }
 
@@ -88,7 +86,7 @@ func GetTables6() ([]*Table, error) {
 }
 */
 
-func getTable(name, family string) (tables []*Table, err error) {
+func getTable(name, family string) (tables []Table, err error) {
 	var f int
 	var ok bool
 	if f, ok = familyMap[family]; !ok {
@@ -157,26 +155,6 @@ func getTable(name, family string) (tables []*Table, err error) {
 	var n C.int
 	var sn C.ssize_t
 	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
-	tablech := make(tableChan)
-
-	readyCh := make(chan bool, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		readyCh <- true
-		for {
-			select {
-			case t, ok := <-tablech:
-				if ok {
-					tables = append(tables, t)
-				} else {
-					return
-				}
-			}
-		}
-	}()
-	<-readyCh
 
 	for sn > 0 {
 		n, cerr = C.mnl_cb_run(
@@ -185,7 +163,7 @@ func getTable(name, family string) (tables []*Table, err error) {
 			C.uint(seq),
 			portid,
 			C.mnl_cb_t(C.get_go_table_cb()),
-			unsafe.Pointer(&tablech))
+			unsafe.Pointer(&tables))
 
 		sn = C.ssize_t(n)
 		if sn <= 0 {
@@ -193,9 +171,6 @@ func getTable(name, family string) (tables []*Table, err error) {
 		}
 		sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	}
-
-	close(tablech)
-	wg.Wait()
 
 	if sn == -1 {
 		err = fmt.Errorf("mnl_cb_run: %s", cerr)

@@ -59,17 +59,14 @@ func go_table_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 		return C.MNL_CB_ERROR
 	}
 
-	table := &jtable.Table
-
-	tablech := (*tableChan)(data)
-	*tablech <- table
+	tables := (*[]Table)(data)
+	*tables = append(*tables, jtable.Table)
 
 	return C.MNL_CB_OK
 }
 
 //export go_rule_callback
 func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
-
 	r := C.nft_rule_alloc()
 	defer C.free(unsafe.Pointer(r))
 
@@ -85,7 +82,10 @@ func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 		4096,
 		r,
 		C.uint32_t(outputType),
-		0)
+		0,
+	)
+
+	//log.Printf("json: %s", buf)
 
 	jrule := jsonRule{}
 	jsonStr := string(buf)
@@ -96,10 +96,8 @@ func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 		return C.MNL_CB_ERROR
 	}
 
-	rule := &jrule.Rule
-
-	rulech := (*ruleChan)(data)
-	*rulech <- rule
+	rules := (*[]Rule)(data)
+	*rules = append(*rules, jrule.Rule)
 
 	return C.MNL_CB_OK
 }
