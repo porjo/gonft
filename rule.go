@@ -82,13 +82,15 @@ type nftRule struct {
 }
 
 type Rule struct {
-	Table   *Table
-	Chain   *Chain
-	Family  string
-	Proto   string
-	DPort   int
-	SPort   int
-	Counter int64
+	Table    *Table
+	Chain    *Chain
+	Family   string
+	Position int
+	Proto    string
+	DPort    int
+	SPort    int
+	Packets  int64
+	Bytes    int64
 	//output interface
 	Oif string
 	//egress
@@ -96,7 +98,7 @@ type Rule struct {
 }
 
 func (r Rule) String() string {
-	return fmt.Sprintf("%s %s %s %d %d", r.Family, r.Table, r.Chain, r.Handle, r.Position)
+	return fmt.Sprintf("%s %s %s %d %d", r.Family, r.Table, r.Chain)
 }
 
 /*
