@@ -18,8 +18,12 @@ package nft
 
 import (
 	//	"errors"
+	//	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 	"unsafe"
 )
@@ -47,43 +51,563 @@ import "C"
 
 // json wrapper
 type jsonRule struct {
-	Rule Rule `json:"rule"`
+	Rule nftRule `json:"rule"`
 }
 
-type Rule struct {
+type nftRule struct {
 	Table       string `json:"table"`
 	Chain       string `json:"chain"`
 	Family      string `json:"family"`
-	Handle      uint64 `json:"handle"`
+	Handle      uint64 `json:"handle,omitempty"`
 	Position    uint64 `json:"position,omitempty"`
 	CompatFlags uint32 `json:"compat_flags,omitempty"`
 	CompatProto uint32 `json:"compat_proto,omitempty"`
-	Expr        []Expr `json:"expr,omitempty"`
+
+	Expr []expr `json:"expr"`
 
 	// Used to store C rule ptr temporarily
 	rule *C.struct_nft_rule
 }
 
-type Expr struct {
+type expr struct {
 	Type   string `json:"type,omitempty"`
 	Dreg   int    `json:"dreg,omitempty"`
 	Offset int    `json:"offset,omitempty"`
 	Len    int    `json:"len,omitempty"`
 	Base   string `json:"base,omitempty"`
 
-	Sreg    int    `json:"sreg,omitempty"`
-	Op      string `json:"op,omitempty"`
-	DataReg struct {
-		Type    string `json:"type,omitempty"`
-		Len     int    `json:"len,omitempty"`
-		Data0   string `json:"data0,omitempty"`
-		Verdict string `json:"verdict,omitempty"`
-	} `json:"data_reg,omitempty"`
+	// Used by 'cmp'
+	Sreg    int      `json:"sreg,omitempty"`
+	Op      string   `json:"op,omitempty"`
+	DataReg *dataReg `json:"data_reg,omitempty"`
+
+	// Used by 'meta'
+	Key string `json:"key,omitempty"`
+
+	// Used by 'counter'
+	Packets uint64 `json:"pkts,omitempty"`
+	Bytes   uint64 `json:"bytes,omitempty"`
+
+	// Used by 'bitwise'
+	Mask *mask `json:"mask,omitempty"`
+	Xor  *xor  `json:"xor,omitempty"`
 }
 
-func (r Rule) String() string {
-	return fmt.Sprintf("%s %s %s %d %d", r.Family, r.Table, r.Chain, r.Handle, r.Position)
+type dataReg struct {
+	Type    string `json:"type,omitempty"`
+	Len     int    `json:"len,omitempty"`
+	Data0   string `json:"data0,omitempty"`
+	Data1   string `json:"data1,omitempty"`
+	Data2   string `json:"data2,omitempty"`
+	Data3   string `json:"data3,omitempty"`
+	Verdict string `json:"verdict,omitempty"`
 }
+
+type mask struct {
+	DataReg dataReg `json:"data_reg,omitempty"`
+}
+
+type xor struct {
+	DataReg dataReg `json:"data_reg,omitempty"`
+}
+
+type Rule struct {
+	Table    string
+	Chain    string
+	Family   string
+	Position uint64
+	Handle   uint64
+
+	Proto   int
+	DPort   int
+	SPort   int
+	Packets uint64
+	Bytes   uint64
+
+	DAddr *net.IPNet
+	SAddr *net.IPNet
+
+	//output interface
+	OIf *net.Interface
+	//input interface
+	IIf *net.Interface
+
+	Action string
+}
+
+// Get all rules for given TCF
+func (x *TCF) GetRules() (rules []Rule, err error) {
+	nrules, err := getRules(x.Table.Name, x.Chain.Name, x.Family)
+
+	if err != nil {
+		return
+	}
+
+	rules, err = rulesNft2Go(nrules)
+
+	return
+}
+
+// convert libnft rules to gonft rules
+func rulesNft2Go(nrules []nftRule) (rules []Rule, err error) {
+	for _, nr := range nrules {
+
+		r := &Rule{}
+		r.Table = nr.Table
+		r.Chain = nr.Chain
+		r.Family = nr.Family
+		r.Position = nr.Position
+		r.Handle = nr.Handle
+
+		for i := 0; i < len(nr.Expr); i++ {
+
+			switch nr.Expr[i].Type {
+			case "payload":
+				if err = r.processPayload(nr, i); err != nil {
+					return
+				}
+			case "counter":
+				r.Packets = nr.Expr[i].Packets
+				r.Bytes = nr.Expr[i].Bytes
+			case "meta":
+				if err = r.processMeta(nr, i); err != nil {
+					return
+				}
+			case "immediate":
+				r.Action = nr.Expr[i].DataReg.Verdict
+			}
+		}
+		rules = append(rules, *r)
+	}
+
+	return
+}
+
+func ruleGo2Nft(r Rule) (nr nftRule, err error) {
+	var e expr
+
+	nr.Table = r.Table
+	nr.Chain = r.Chain
+	nr.Family = r.Family
+	if nr.Position != 0 {
+		nr.Position = r.Position
+	}
+
+	if nr.Handle != 0 {
+		nr.Handle = r.Handle
+	}
+
+	if (r.DPort != 0 || r.SPort != 0) && r.Proto == 0 {
+		err = fmt.Errorf("Protocol must be specified with src/dst port")
+		return
+	}
+
+	if r.Proto != 0 {
+
+		e = expr{}
+		e.Type = "payload"
+		e.Dreg = 1
+		e.Offset = 9
+		e.Len = 1
+		e.Base = "network"
+
+		nr.Expr = append(nr.Expr, e)
+
+		data := make([]byte, 4)
+		binary.BigEndian.PutUint32(data, uint32(r.Proto))
+		data0 := fmt.Sprintf("0x%x", data)
+		if err = (&nr).processCmp(1, data0, "", "", ""); err != nil {
+			return
+		}
+	}
+
+	if r.DPort != 0 || r.SPort != 0 {
+		e = expr{}
+		e.Type = "payload"
+		e.Dreg = 1
+
+		var port int
+		if r.SPort != 0 {
+			port = r.SPort
+			e.Offset = 1
+		}
+		if r.DPort != 0 {
+			port = r.DPort
+			e.Offset = 2
+		}
+		e.Len = 2
+		e.Base = "transport"
+
+		nr.Expr = append(nr.Expr, e)
+
+		data := make([]byte, 4)
+		binary.BigEndian.PutUint16(data, 0)
+		binary.LittleEndian.PutUint16(data[2:4], uint16(port))
+		data0 := fmt.Sprintf("0x%x", data)
+		if err = (&nr).processCmp(2, data0, "", "", ""); err != nil {
+			return
+		}
+	}
+
+	if r.DAddr != nil {
+		if err = (&nr).processAddr(r.DAddr, true); err != nil {
+			return
+		}
+	}
+
+	if r.SAddr != nil {
+		if err = (&nr).processAddr(r.SAddr, false); err != nil {
+			return
+		}
+	}
+
+	if r.OIf != nil {
+		if err = (&nr).processIf(r.OIf, false); err != nil {
+			return
+		}
+	}
+
+	if r.IIf != nil {
+		if err = (&nr).processIf(r.IIf, true); err != nil {
+			return
+		}
+	}
+
+	return
+}
+
+func (nr *nftRule) processCmp(length int, data0, data1, data2, data3 string) (err error) {
+	e := expr{}
+	e.Type = "cmp"
+	e.Sreg = 1
+	e.Op = "eq"
+
+	e.DataReg = &dataReg{}
+	e.DataReg.Len = length
+	e.DataReg.Type = "value"
+	e.DataReg.Data0 = data0
+
+	if data1 != "" {
+		e.DataReg.Data1 = data1
+	}
+	if data2 != "" {
+		e.DataReg.Data2 = data2
+	}
+	if data3 != "" {
+		e.DataReg.Data3 = data3
+	}
+	nr.Expr = append(nr.Expr, e)
+
+	return
+}
+
+func (nr *nftRule) processIf(iface *net.Interface, isInput bool) (err error) {
+
+	e := expr{}
+	e.Type = "meta"
+	e.Dreg = 1
+	if isInput {
+		e.Key = "iif"
+	} else {
+		e.Key = "oif"
+	}
+
+	nr.Expr = append(nr.Expr, e)
+
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint32(data, uint32(iface.Index))
+	data0 := fmt.Sprintf("0x%x", data)
+	if err = (&nr).processCmp(4, data0, "", "", ""); err != nil {
+		return
+	}
+
+	return
+
+}
+func (nr *nftRule) processAddr(ipnet *net.IPNet, isDest bool) (err error) {
+	var is4 bool
+	//TODO: better way to detect ip4/ip6 ?
+	if ipnet.IP.To4() != nil {
+		is4 = true
+	}
+
+	e := expr{}
+	e.Type = "payload"
+	e.Dreg = 1
+
+	e.Len = 4
+	if isDest {
+		e.Offset = 16
+		if !is4 {
+			e.Offset = 24
+			e.Len = 16
+		}
+	} else {
+		e.Offset = 12
+		if !is4 {
+			e.Offset = 8
+			e.Len = 16
+		}
+	}
+	e.Base = "network"
+
+	nr.Expr = append(nr.Expr, e)
+
+	e = expr{}
+	e.Type = "bitwise"
+	e.Sreg = 1
+	e.Dreg = 1
+	e.Mask = &mask{}
+	if is4 {
+		lint := binary.LittleEndian.Uint32(ipnet.Mask)
+		e.Mask.DataReg = dataReg{
+			Type:  "value",
+			Len:   4,
+			Data0: fmt.Sprintf("0x%08x", lint),
+		}
+	} else {
+		e.Len = 16
+		lint0 := binary.LittleEndian.Uint32(ipnet.Mask[0:4])
+		lint1 := binary.LittleEndian.Uint32(ipnet.Mask[4:8])
+		lint2 := binary.LittleEndian.Uint32(ipnet.Mask[8:12])
+		lint3 := binary.LittleEndian.Uint32(ipnet.Mask[12:16])
+		e.Mask.DataReg = dataReg{
+			Type:  "value",
+			Len:   16,
+			Data0: fmt.Sprintf("0x%08x", lint0),
+			Data1: fmt.Sprintf("0x%08x", lint1),
+			Data2: fmt.Sprintf("0x%08x", lint2),
+			Data3: fmt.Sprintf("0x%08x", lint3),
+		}
+	}
+
+	e.Xor = &xor{}
+	if is4 {
+		e.Len = 4
+		e.Xor.DataReg = dataReg{
+			Type:  "value",
+			Len:   4,
+			Data0: "0x00000000",
+		}
+	} else {
+		e.Len = 16
+		e.Xor.DataReg = dataReg{
+			Type:  "value",
+			Len:   16,
+			Data0: "0x00000000",
+			Data1: "0x00000000",
+			Data2: "0x00000000",
+			Data3: "0x00000000",
+		}
+	}
+
+	nr.Expr = append(nr.Expr, e)
+
+	var data0, data1, data2, data3 string
+	length := 4
+	if is4 {
+		lint0 := binary.LittleEndian.Uint32(ipnet.IP)
+		data0 = fmt.Sprintf("0x%08x", lint0)
+	} else {
+		length = 16
+		lint0 := binary.LittleEndian.Uint32(ipnet.IP[0:4])
+		data0 = fmt.Sprintf("0x%08x", lint0)
+		lint1 := binary.LittleEndian.Uint32(ipnet.IP[4:8])
+		data1 = fmt.Sprintf("0x%08x", lint1)
+		lint2 := binary.LittleEndian.Uint32(ipnet.IP[8:12])
+		data2 = fmt.Sprintf("0x%08x", lint2)
+		lint3 := binary.LittleEndian.Uint32(ipnet.IP[12:16])
+		data3 = fmt.Sprintf("0x%08x", lint3)
+	}
+	if err = (&nr).processCmp(length, data0, data1, data2, data3); err != nil {
+		return
+	}
+
+	return
+}
+
+// process 'bitwise' expr
+func (r *Rule) processBitwise(nr nftRule, idx int, isDest bool) (err error) {
+	if idx+1 >= len(nr.Expr) {
+		err = fmt.Errorf("Index out of range %d", idx+1)
+		return
+	}
+
+	var ip net.IP
+	var mask net.IPMask
+
+	if mask, err = datareg2IP(&nr.Expr[idx].Mask.DataReg); err != nil {
+		return
+	}
+	if ip, err = datareg2IP(nr.Expr[idx+1].DataReg); err != nil {
+		return
+	}
+
+	if isDest {
+		r.DAddr = &net.IPNet{}
+		r.DAddr.IP = ip
+		r.DAddr.Mask = mask
+	} else {
+		r.SAddr = &net.IPNet{}
+		r.SAddr.IP = ip
+		r.SAddr.Mask = mask
+	}
+
+	return
+}
+
+// Return byte slice suitable for net.IP
+func datareg2IP(dr *dataReg) (data []byte, err error) {
+	length := dr.Len
+
+	switch length {
+	// ip4
+	case 4:
+		if data, err = hex32(dr.Data0); err != nil {
+			return
+		}
+	// ip6
+	case 16:
+		var tmp []byte
+		if tmp, err = hex32(dr.Data0); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+		if tmp, err = hex32(dr.Data1); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+		if tmp, err = hex32(dr.Data2); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+		if tmp, err = hex32(dr.Data3); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+	}
+
+	return
+}
+
+// convert 32bit hex string encoded in bigendian, to littlendian byte slice
+func hex32(hex string) (b []byte, err error) {
+	var bigend uint64
+	if hex == "" {
+		err = fmt.Errorf("hex string empty")
+		return
+	}
+	b = make([]byte, 4)
+	bigend, err = strconv.ParseUint(hex, 0, 32)
+	if err != nil {
+		return
+	}
+
+	binary.LittleEndian.PutUint32(b, uint32(bigend))
+	return
+}
+
+// process 'payload' expr
+func (r *Rule) processPayload(nr nftRule, idx int) (err error) {
+
+	if idx+1 >= len(nr.Expr) {
+		err = fmt.Errorf("Index out of range %d", idx+1)
+		return
+	}
+
+	switch nr.Expr[idx].Base {
+	case "network":
+
+		if nr.Expr[idx+1].Type == "bitwise" {
+			// src/dest address
+			var isDest bool
+			if nr.Expr[idx].Offset == 16 {
+				isDest = true
+			}
+			err = r.processBitwise(nr, idx+1, isDest)
+			if err != nil {
+				return
+			}
+		} else {
+			// protocol e.g. tcp, udp
+			hex := nr.Expr[idx+1].DataReg.Data0
+			if hex == "" {
+				err = fmt.Errorf("Data0 empty")
+				return
+			}
+			var n uint64
+			if n, err = strconv.ParseUint(hex, 0, 32); err != nil {
+				return
+			}
+			r.Proto = int(n)
+		}
+	case "transport":
+		// src/dest port
+		hex := nr.Expr[idx+1].DataReg.Data0
+		if hex == "" {
+			err = fmt.Errorf("Data0 empty")
+			return
+		}
+
+		// port number is a 16bit value embedded in a
+		// bigendian 32bit register
+		var bigend uint64
+		if bigend, err = strconv.ParseUint(hex, 0, 32); err != nil {
+			return
+		}
+
+		length := nr.Expr[idx+1].DataReg.Len
+		data := make([]byte, length)
+
+		binary.BigEndian.PutUint16(data, uint16(bigend))
+		port := binary.LittleEndian.Uint16(data)
+
+		switch nr.Expr[idx].Offset {
+		case 1:
+			r.SPort = int(port)
+		case 2:
+			r.DPort = int(port)
+		}
+	}
+	return
+}
+
+// process 'meta' expr e.g. network interfaces
+func (r *Rule) processMeta(nr nftRule, idx int) (err error) {
+	var iface uint64
+
+	if idx+1 >= len(nr.Expr) {
+		err = fmt.Errorf("Index out of range %d", idx+1)
+		return
+	}
+
+	hex := nr.Expr[idx+1].DataReg.Data0
+	if hex == "" {
+		err = fmt.Errorf("Data0 empty")
+		return
+	}
+	if iface, err = strconv.ParseUint(hex, 0, 32); err != nil {
+		return
+	}
+
+	switch nr.Expr[idx].Key {
+	case "iif":
+		if r.IIf, err = net.InterfaceByIndex(int(iface)); err != nil {
+			return
+		}
+	case "oif":
+		if r.OIf, err = net.InterfaceByIndex(int(iface)); err != nil {
+			return
+		}
+	}
+	return
+}
+
+/*
+func (r Rule) String() string {
+	return fmt.Sprintf("%s %s %s %d %d", r.Family, r.Table, r.Chain)
+}
+*/
 
 /*
 func GetRules6(chain string) ([]*Rule, error) {
@@ -91,7 +615,7 @@ func GetRules6(chain string) ([]*Rule, error) {
 }
 */
 
-func getRule(chain, family string) (rules []Rule, err error) {
+func getRules(table, chain, family string) (rules []nftRule, err error) {
 	var ok bool
 	var f, bufsize int
 	var cerr error
@@ -106,7 +630,7 @@ func getRule(chain, family string) (rules []Rule, err error) {
 	r := C.nft_rule_alloc()
 	defer C.free(unsafe.Pointer(r))
 
-	seq := time.Time{}.Unix()
+	seq := time.Now().Unix()
 
 	// The following const was not recognised from libmnl.h
 	// #define MNL_SOCKET_BUFFER_SIZE (getpagesize() < 8192L ? getpagesize() : 8192L)
@@ -128,9 +652,6 @@ func getRule(chain, family string) (rules []Rule, err error) {
 		return
 	}
 
-	cstring := C.CString(chain)
-	defer C.free(unsafe.Pointer(cstring))
-	C.nft_rule_attr_set(r, C.NFT_RULE_ATTR_CHAIN, unsafe.Pointer(cstring))
 	C.nft_rule_nlmsg_build_payload(nlh, r)
 
 	nl := C.mnl_socket_open(C.NETLINK_NETFILTER)
@@ -179,12 +700,22 @@ func getRule(chain, family string) (rules []Rule, err error) {
 	}
 	C.mnl_socket_close(nl)
 
+	//filter out extraneous rules
+	var newRules []nftRule
+	for _, r := range rules {
+		if r.Table == table && r.Chain == chain {
+			newRules = append(newRules, r)
+		}
+	}
+
+	rules = newRules
+
 	return
 }
 
 func AddJson() (err error) {
-	var rules []Rule
-	rules, err = getRule("input", "ip4")
+	var rules []nftRule
+	rules, err = getRules("filter", "input", "ip4")
 
 	if len(rules) == 0 {
 		err = fmt.Errorf("no rules returned")
@@ -194,8 +725,11 @@ func AddJson() (err error) {
 	rule := rules[0]
 
 	for i, _ := range rule.Expr {
-		if rule.Expr[i].DataReg.Data0 == "0x00000006" { //tcp
-			rule.Expr[i].DataReg.Data0 = "0x00000011" //udp (hex)
+		if rule.Expr[i].DataReg != nil {
+			if rule.Expr[i].DataReg.Data0 == "0x00000006" { //tcp
+				rule.Expr[i].DataReg.Data0 = "0x00000011" //udp (hex)
+				rule.Handle = 16
+			}
 		}
 	}
 
@@ -210,8 +744,11 @@ func AddJson() (err error) {
 	}
 	defer C.free(unsafe.Pointer(r))
 
+	jrule := jsonRule{
+		Rule: rule,
+	}
 	var buf []byte
-	buf, err = json.Marshal(rule)
+	buf, err = json.Marshal(jrule)
 
 	var parseErr C.struct_nft_parse_err
 	n, cerr = C.nft_rule_parse(
@@ -226,77 +763,122 @@ func AddJson() (err error) {
 	return
 }
 
-func (r *Rule) Add() (err error) {
+func (rule *Rule) AddJson2() (err error) {
+
+	var nrule nftRule
 	var cerr error
-	var bufsize int
 	var n C.int
 	var sn C.ssize_t
+	var r *C.struct_nft_rule
+	var buf []byte
 
-	// addSetup allocs r.rule
-	err = r.addSetup("tcp", 80)
-	if err != nil {
+	if nrule, err = ruleGo2Nft(*rule); err != nil {
 		return
 	}
-	defer C.free(unsafe.Pointer(r.rule))
+
+	r, cerr = C.nft_rule_alloc()
+	if r == nil {
+		err = fmt.Errorf("rule alloc failure: %s", cerr)
+		return
+	}
+	defer C.nft_rule_free(r)
+
+	jrule := jsonRule{
+		Rule: nrule,
+	}
+	//buf, err = json.MarshalIndent(nrule, "", "  ")
+	buf, err = json.Marshal(jrule)
+
+	var parseErr *C.struct_nft_parse_err
+	parseErr, cerr = C.nft_parse_err_alloc()
+	if parseErr == nil {
+		err = fmt.Errorf("rule parse err alloc failure: %s", cerr)
+		return
+	}
+	defer C.nft_parse_err_free(parseErr)
+
+	n, cerr = C.nft_rule_parse(
+		r,
+		C.enum_nft_parse_type(C.NFT_PARSE_JSON),
+		(*C.char)(unsafe.Pointer(&buf[0])),
+		parseErr,
+	)
+
+	fmt.Printf("nft_rule_parse r %v, n %d, \nbuf %s\n, parseErr %v, cerr %s\n", r, n, buf, parseErr, cerr)
+
+	C.nft_rule_attr_unset(r, C.NFT_RULE_ATTR_HANDLE)
+
+	batching := C.nft_batch_is_supported()
+	if batching < 0 {
+		err = fmt.Errorf("Cannot talk to nfnetlink")
+		return
+	}
+
+	seq := time.Now().Unix()
+
+	// The following const was not recognised from libmnl.h
+	// #define MNL_SOCKET_BUFFER_SIZE (getpagesize() < 8192L ? getpagesize() : 8192L)
+	var bufsize int
+	if C.getpagesize() < 8192 {
+		bufsize = int(C.getpagesize())
+	} else {
+		bufsize = 8192
+	}
+	buf = make([]byte, bufsize)
+	batch := C.mnl_nlmsg_batch_start(
+		unsafe.Pointer(&buf[0]),
+		C.size_t(len(buf)),
+	)
+	fmt.Printf("after batch start\n")
+
+	if batching >= 0 {
+		seq++
+		C.nft_batch_begin(
+			(*C.char)(C.mnl_nlmsg_batch_current(batch)),
+			C.uint32_t(seq),
+		)
+		C.mnl_nlmsg_batch_next(batch)
+	}
+	fmt.Printf("after batch begin\n")
+
+	ruleSeq := seq
+
+	family := C.nft_rule_attr_get_u32(
+		r,
+		C.NFT_RULE_ATTR_FAMILY,
+	)
+	seq++
+	nlh := C.nft_rule_nlmsg_build_hdr(
+		(*C.char)(unsafe.Pointer(&buf[0])),
+		C.NFT_MSG_NEWRULE,
+		C.uint16_t(family),
+		C.NLM_F_CREATE|C.NLM_F_APPEND|C.NLM_F_ACK,
+		C.uint32_t(seq),
+	)
+	C.nft_rule_nlmsg_build_payload(nlh, r)
+	C.mnl_nlmsg_batch_next(batch)
+
+	if batching > 0 {
+		seq++
+		C.nft_batch_end(
+			(*C.char)(C.mnl_nlmsg_batch_current(batch)),
+			C.uint32_t(seq),
+		)
+		C.mnl_nlmsg_batch_next(batch)
+	}
+	fmt.Printf("after batch end\n")
 
 	nl := C.mnl_socket_open(C.NETLINK_NETFILTER)
 	if nl == nil {
 		err = fmt.Errorf("mnl_socket_open")
 		return
 	}
-
 	if C.mnl_socket_bind(nl, 0, C.MNL_SOCKET_AUTOPID) < 0 {
 		err = fmt.Errorf("mnl_socket_bind")
 		return
 	}
 
-	seq := time.Time{}.Unix()
-
-	// The following const was not recognised from libmnl.h
-	// #define MNL_SOCKET_BUFFER_SIZE (getpagesize() < 8192L ? getpagesize() : 8192L)
-	if C.getpagesize() < 8192 {
-		bufsize = int(C.getpagesize())
-	} else {
-		bufsize = 8192
-	}
-	buf := make([]byte, bufsize)
-	batch := C.mnl_nlmsg_batch_start(
-		unsafe.Pointer(&buf[0]),
-		C.size_t(len(buf)),
-	)
-
-	seq++
-	batchPut(
-		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
-		uint16(C.NFNL_MSG_BATCH_BEGIN),
-		seq,
-	)
-
-	C.mnl_nlmsg_batch_next(batch)
-
-	seq++
-	nlh := C.nft_rule_nlmsg_build_hdr(
-		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
-		C.NFT_MSG_NEWRULE,
-		C.uint16_t(C.nft_rule_attr_get_u32(
-			r.rule,
-			C.NFT_RULE_ATTR_FAMILY,
-		)),
-		C.NLM_F_APPEND|C.NLM_F_CREATE|C.NLM_F_ACK,
-		C.uint32_t(seq),
-	)
-
-	C.nft_rule_nlmsg_build_payload(nlh, r.rule) //finished with r.rule, gets freed via defer
-	C.mnl_nlmsg_batch_next(batch)
-
-	seq++
-	batchPut(
-		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
-		uint16(C.NFNL_MSG_BATCH_END),
-		seq,
-	)
-	C.mnl_nlmsg_batch_next(batch)
-
+	portid := C.mnl_socket_get_portid(nl)
 	sn, cerr = C.mnl_socket_sendto(
 		nl,
 		unsafe.Pointer(C.mnl_nlmsg_batch_head(batch)),
@@ -306,25 +888,33 @@ func (r *Rule) Add() (err error) {
 		err = fmt.Errorf("mnl_socket_sendto: err %s", cerr)
 		return
 	}
-
 	C.mnl_nlmsg_batch_stop(batch)
+	fmt.Printf("after batch stop, sn %d portid %d seq %d ruleSeq %d batch size %d\n", sn, portid, seq, ruleSeq, C.mnl_nlmsg_batch_size(batch))
 
-	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
+	sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	if sn == -1 {
-		err = fmt.Errorf("mnl_socket_recvfrom")
+		err = fmt.Errorf("mnl_socket_recvfrom: err %s", cerr)
 		return
 	}
+	fmt.Printf("after recv from\n")
 
-	portid := C.mnl_socket_get_portid(nl)
+	for sn > 0 {
+		n, cerr = C.mnl_cb_run(
+			unsafe.Pointer(&buf[0]),
+			C.size_t(sn),
+			C.uint(ruleSeq),
+			portid,
+			nil,
+			nil,
+		)
 
-	n, cerr = C.mnl_cb_run(
-		unsafe.Pointer(&buf[0]),
-		C.size_t(sn),
-		0,
-		portid,
-		nil,
-		nil,
-	)
+		if n <= 0 {
+			break
+		}
+		sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
+	}
+
+	fmt.Printf("after cb run")
 	if n == -1 {
 		err = fmt.Errorf("mnl_cb_run: err %s", cerr)
 		return
@@ -333,235 +923,4 @@ func (r *Rule) Add() (err error) {
 	C.mnl_socket_close(nl)
 
 	return
-}
-
-func (r *Rule) addSetup(protoStr string, port int) (err error) {
-	if r.Table == "" || r.Chain == "" || r.Family == "" {
-		err = fmt.Errorf("table, chain, family missing. These must be set")
-		return
-	}
-
-	var proto C.uint8_t
-	var ok bool
-	if proto, ok = protoMap[protoStr]; !ok {
-		err = fmt.Errorf("unrecognised protocol %s", protoStr)
-		return
-	}
-	var cerr error
-
-	r.rule, cerr = C.nft_rule_alloc()
-	if r == nil {
-		err = fmt.Errorf("rule alloc failure: %s", cerr)
-		return
-	}
-
-	ctable := C.CString(r.Table)
-	defer C.free(unsafe.Pointer(ctable))
-	C.nft_rule_attr_set(
-		r.rule,
-		C.NFT_RULE_ATTR_TABLE,
-		unsafe.Pointer(ctable),
-	)
-	cchain := C.CString(r.Chain)
-	defer C.free(unsafe.Pointer(cchain))
-	C.nft_rule_attr_set(
-		r.rule,
-		C.NFT_RULE_ATTR_CHAIN,
-		unsafe.Pointer(cchain),
-	)
-
-	if f, ok := familyMap[r.Family]; ok {
-		C.nft_rule_attr_set_u32(
-			r.rule,
-			C.NFT_RULE_ATTR_FAMILY,
-			C.uint32_t(f),
-		)
-	} else {
-		err = fmt.Errorf("unrecognised family %s", r.Family)
-		return
-	}
-	if r.Handle > 0 {
-		C.nft_rule_attr_set_u64(
-			r.rule,
-			C.NFT_RULE_ATTR_POSITION,
-			C.uint64_t(r.Handle),
-		)
-	}
-
-	var iphdr C.struct_iphdr
-
-	err = r.addPayload(
-		int(C.NFT_PAYLOAD_NETWORK_HEADER),
-		int(C.NFT_REG_1),
-		unsafe.Offsetof(iphdr.protocol),
-		1, // sizeof(uint8_t)
-	)
-	if err != nil {
-		return
-	}
-
-	err = r.addCmp(
-		int(C.NFT_REG_1),
-		int(C.NFT_CMP_EQ),
-		&proto,
-		1, // sizeof(uint8_t)
-	)
-	if err != nil {
-		return
-	}
-
-	var tcphdr C.struct_tcphdr
-	dport := C.htons(C.uint16_t(port))
-	err = r.addPayload(
-		int(C.NFT_PAYLOAD_TRANSPORT_HEADER),
-		int(C.NFT_REG_1),
-		unsafe.Offsetof(tcphdr.dest),
-		2, // sizeof(uint16_t)
-	)
-	if err != nil {
-		return
-	}
-
-	err = r.addCmp(
-		int(C.NFT_REG_1),
-		int(C.NFT_CMP_EQ),
-		&dport,
-		2, // sizeof(uint16_t)
-	)
-	if err != nil {
-		return
-	}
-
-	err = r.addCounter()
-	if err != nil {
-		return
-	}
-
-	return
-}
-
-func (r *Rule) addCmp(sreg, op int, data interface{}, length uintptr) (err error) {
-	ccmp := C.CString("cmp")
-	defer C.free(unsafe.Pointer(ccmp))
-	// freed by libnftnl
-	e, cerr := C.nft_rule_expr_alloc(ccmp)
-	if e == nil {
-		err = fmt.Errorf("rule expr alloc failure: %s", cerr)
-		return
-	}
-
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_CMP_SREG,
-		C.uint32_t(sreg),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_CMP_OP,
-		C.uint32_t(op),
-	)
-
-	switch data.(type) {
-	case *C.uint8_t:
-		if proto, ok := data.(*C.uint8_t); ok {
-
-			C.nft_rule_expr_set(
-				e,
-				C.NFT_EXPR_CMP_DATA,
-				unsafe.Pointer(proto),
-				C.uint32_t(length),
-			)
-		} else {
-			err = fmt.Errorf("unable to assert *C.uint8_t")
-			return
-		}
-	case *C.uint16_t:
-		if port, ok := data.(*C.uint16_t); ok {
-
-			C.nft_rule_expr_set(
-				e,
-				C.NFT_EXPR_CMP_DATA,
-				unsafe.Pointer(port),
-				C.uint32_t(length),
-			)
-		} else {
-			err = fmt.Errorf("unable to assert *C.uint16_t")
-			return
-		}
-	}
-
-	C.nft_rule_add_expr(r.rule, e)
-
-	return
-}
-
-func (r *Rule) addPayload(base, dreg int, offset, length uintptr) (err error) {
-	cpayload := C.CString("payload")
-	defer C.free(unsafe.Pointer(cpayload))
-	// freed by libnftnl
-	e, cerr := C.nft_rule_expr_alloc(cpayload)
-	if e == nil {
-		err = fmt.Errorf("rule expr alloc failure: %s", cerr)
-		return
-	}
-
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_BASE,
-		C.uint32_t(base),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_DREG,
-		C.uint32_t(dreg),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_OFFSET,
-		C.uint32_t(offset),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_LEN,
-		C.uint32_t(length),
-	)
-
-	C.nft_rule_add_expr(r.rule, e)
-
-	return
-}
-
-func (r *Rule) addCounter() (err error) {
-	ccounter := C.CString("counter")
-	defer C.free(unsafe.Pointer(ccounter))
-	// freed by libnftnl
-	e, cerr := C.nft_rule_expr_alloc(ccounter)
-	if e == nil {
-		err = fmt.Errorf("rule expr alloc failure: %s", cerr)
-		return
-	}
-
-	C.nft_rule_add_expr(r.rule, e)
-
-	return
-}
-
-func batchPut(buf *C.char, msgType uint16, seq int64) {
-	nlh := C.mnl_nlmsg_put_header(
-		unsafe.Pointer(buf),
-	)
-	nlh.nlmsg_type = C.__u16(msgType)
-	nlh.nlmsg_flags = C.NLM_F_REQUEST
-	nlh.nlmsg_seq = C.__u32(seq)
-
-	var nfg *C.struct_nfgenmsg
-	nfg = (*C.struct_nfgenmsg)(
-		C.mnl_nlmsg_put_extra_header(
-			nlh,
-			C.size_t(unsafe.Sizeof(*nfg)),
-		),
-	)
-	nfg.nfgen_family = C.AF_INET
-	nfg.version = C.NFNETLINK_V0
-	nfg.res_id = C.NFNL_SUBSYS_NFTABLES
 }

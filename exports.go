@@ -85,8 +85,6 @@ func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 		0,
 	)
 
-	//log.Printf("json: %s", buf)
-
 	jrule := jsonRule{}
 	jsonStr := string(buf)
 	buf = []byte(strings.TrimRight(jsonStr, "\x00"))
@@ -96,7 +94,9 @@ func go_rule_callback(nlh *C.struct_nlmsghdr, data unsafe.Pointer) int {
 		return C.MNL_CB_ERROR
 	}
 
-	rules := (*[]Rule)(data)
+	log.Printf("rule json %s\n", buf)
+
+	rules := (*[]nftRule)(data)
 	*rules = append(*rules, jrule.Rule)
 
 	return C.MNL_CB_OK
