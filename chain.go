@@ -10,5 +10,7 @@ type Chain struct {
 
 // Get all rules for given chain
 func (c *Chain) GetRules() ([]Rule, error) {
-	return getRule(c.Name, "ip")
+	rules := getRules(c.Name, "ip")
+
+	return rulesConvert(rules)
 }

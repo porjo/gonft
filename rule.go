@@ -47,10 +47,10 @@ import "C"
 
 // json wrapper
 type jsonRule struct {
-	Rule Rule `json:"rule"`
+	rule nftRule `json:"rule"`
 }
 
-type Rule struct {
+type nftRule struct {
 	Table       string `json:"table"`
 	Chain       string `json:"chain"`
 	Family      string `json:"family"`
@@ -58,27 +58,41 @@ type Rule struct {
 	Position    uint64 `json:"position,omitempty"`
 	CompatFlags uint32 `json:"compat_flags,omitempty"`
 	CompatProto uint32 `json:"compat_proto,omitempty"`
-	Expr        []Expr `json:"expr,omitempty"`
+	Expr        []struct {
+		Type   string `json:"type,omitempty"`
+		Dreg   int    `json:"dreg,omitempty"`
+		Offset int    `json:"offset,omitempty"`
+		Len    int    `json:"len,omitempty"`
+		Base   string `json:"base,omitempty"`
+		// Used by 'meta'
+		Key string `json:"key,omitempty"`
+
+		Sreg    int    `json:"sreg,omitempty"`
+		Op      string `json:"op,omitempty"`
+		DataReg struct {
+			Type    string `json:"type,omitempty"`
+			Len     int    `json:"len,omitempty"`
+			Data0   string `json:"data0,omitempty"`
+			Verdict string `json:"verdict,omitempty"`
+		} `json:"data_reg,omitempty"`
+	}
 
 	// Used to store C rule ptr temporarily
 	rule *C.struct_nft_rule
 }
 
-type Expr struct {
-	Type   string `json:"type,omitempty"`
-	Dreg   int    `json:"dreg,omitempty"`
-	Offset int    `json:"offset,omitempty"`
-	Len    int    `json:"len,omitempty"`
-	Base   string `json:"base,omitempty"`
-
-	Sreg    int    `json:"sreg,omitempty"`
-	Op      string `json:"op,omitempty"`
-	DataReg struct {
-		Type    string `json:"type,omitempty"`
-		Len     int    `json:"len,omitempty"`
-		Data0   string `json:"data0,omitempty"`
-		Verdict string `json:"verdict,omitempty"`
-	} `json:"data_reg,omitempty"`
+type Rule struct {
+	Table   *Table
+	Chain   *Chain
+	Family  string
+	Proto   string
+	DPort   int
+	SPort   int
+	Counter int64
+	//output interface
+	Oif string
+	//egress
+	Iif string
 }
 
 func (r Rule) String() string {
@@ -91,7 +105,7 @@ func GetRules6(chain string) ([]*Rule, error) {
 }
 */
 
-func getRule(chain, family string) (rules []Rule, err error) {
+func getRules(chain, family string) (rules []nftRule, err error) {
 	var ok bool
 	var f, bufsize int
 	var cerr error
@@ -183,8 +197,8 @@ func getRule(chain, family string) (rules []Rule, err error) {
 }
 
 func AddJson() (err error) {
-	var rules []Rule
-	rules, err = getRule("input", "ip4")
+	var rules []nftRule
+	rules, err = getRules("input", "ip4")
 
 	if len(rules) == 0 {
 		err = fmt.Errorf("no rules returned")
@@ -226,6 +240,7 @@ func AddJson() (err error) {
 	return
 }
 
+/* Manual rule add
 func (r *Rule) Add() (err error) {
 	var cerr error
 	var bufsize int
@@ -565,3 +580,4 @@ func batchPut(buf *C.char, msgType uint16, seq int64) {
 	nfg.version = C.NFNETLINK_V0
 	nfg.res_id = C.NFNL_SUBSYS_NFTABLES
 }
+*/
