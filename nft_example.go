@@ -33,18 +33,23 @@ func main() {
 
 	log.Printf("table %s returned", table)
 
-	chain := nft.Chain{}
-	chain.Name = "input"
+	tcf := nft.TCF{}
+	tcf.Table.Name = "filter"
+	tcf.Chain.Name = "input"
+	tcf.Family = "ip6"
 
-	rules, err := chain.GetRules()
+	rules, err := tcf.GetRules()
 	if err != nil {
 		log.Fatalf("GetRules err %s", err)
 	}
 
 	log.Printf("%d rules returned", len(rules))
 	for _, r := range rules {
-		log.Printf("rule %s returned", r)
-		//log.Printf("rule %v", r)
+		log.Printf("rule %v returned", r)
+
+		if r.IIf != nil {
+			log.Printf("rule iff %#v", r.IIf)
+		}
 	}
 
 	//nft.AddJson()

@@ -18,8 +18,12 @@ package nft
 
 import (
 	//	"errors"
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 	"unsafe"
 )
@@ -47,7 +51,7 @@ import "C"
 
 // json wrapper
 type jsonRule struct {
-	rule nftRule `json:"rule"`
+	Rule nftRule `json:"rule"`
 }
 
 type nftRule struct {
@@ -64,42 +68,298 @@ type nftRule struct {
 		Offset int    `json:"offset,omitempty"`
 		Len    int    `json:"len,omitempty"`
 		Base   string `json:"base,omitempty"`
+
+		// Used by 'cmp'
+		Sreg    int     `json:"sreg,omitempty"`
+		Op      string  `json:"op,omitempty"`
+		DataReg DataReg `json:"data_reg,omitempty"`
+
 		// Used by 'meta'
 		Key string `json:"key,omitempty"`
 
-		Sreg    int    `json:"sreg,omitempty"`
-		Op      string `json:"op,omitempty"`
-		DataReg struct {
-			Type    string `json:"type,omitempty"`
-			Len     int    `json:"len,omitempty"`
-			Data0   string `json:"data0,omitempty"`
-			Verdict string `json:"verdict,omitempty"`
-		} `json:"data_reg,omitempty"`
+		// Used by 'counter'
+		Packets uint64 `json:"pkts,omitempty"`
+		Bytes   uint64 `json:"bytes,omitempty"`
+
+		// Used by 'bitwise'
+		Mask struct {
+			DataReg DataReg `json:"data_reg,omitempty"`
+		} `json:"mask,omitempty"`
+		Xor struct {
+			DataReg DataReg `json:"data_reg,omitempty"`
+		} `json:"xor,omitempty"`
 	}
 
 	// Used to store C rule ptr temporarily
 	rule *C.struct_nft_rule
 }
 
-type Rule struct {
-	Table    *Table
-	Chain    *Chain
-	Family   string
-	Position int
-	Proto    string
-	DPort    int
-	SPort    int
-	Packets  int64
-	Bytes    int64
-	//output interface
-	Oif string
-	//egress
-	Iif string
+// Used internally
+type DataReg struct {
+	Type    string `json:"type,omitempty"`
+	Len     int    `json:"len,omitempty"`
+	Data0   string `json:"data0,omitempty"`
+	Data1   string `json:"data1,omitempty"`
+	Data2   string `json:"data2,omitempty"`
+	Data3   string `json:"data3,omitempty"`
+	Verdict string `json:"verdict,omitempty"`
 }
 
+type Rule struct {
+	Table    string
+	Chain    string
+	Family   string
+	Position int
+	Handle   int
+
+	Proto   int
+	DPort   int
+	SPort   int
+	Packets uint64
+	Bytes   uint64
+
+	DAddr net.IPNet
+	SAddr net.IPNet
+
+	//output interface
+	OIf *net.Interface
+	//input interface
+	IIf *net.Interface
+
+	Action string
+}
+
+// Get all rules for given TCF
+func (x *TCF) GetRules() (rules []Rule, err error) {
+	nrules, err := getRules(x.Table.Name, x.Chain.Name, x.Family)
+
+	if err != nil {
+		return
+	}
+
+	rules, err = rulesConvert(nrules)
+
+	return
+}
+
+// convert libnft rules to gonft rules
+func rulesConvert(nrules []nftRule) (rules []Rule, err error) {
+	for _, nr := range nrules {
+
+		r := &Rule{}
+		r.Table = nr.Table
+		r.Chain = nr.Chain
+		r.Family = nr.Family
+		r.Position = int(nr.Position)
+		r.Handle = int(nr.Handle)
+
+		for i := 0; i < len(nr.Expr); i++ {
+
+			switch nr.Expr[i].Type {
+			case "payload":
+				if err = r.processPayload(nr, i); err != nil {
+					return
+				}
+			case "counter":
+				r.Packets = nr.Expr[i].Packets
+				r.Bytes = nr.Expr[i].Bytes
+			case "meta":
+				if err = r.processMeta(nr, i); err != nil {
+					return
+				}
+			case "immediate":
+				r.Action = nr.Expr[i].DataReg.Verdict
+			}
+		}
+		rules = append(rules, *r)
+	}
+
+	return
+}
+
+// process 'bitwise' expr
+func (r *Rule) processBitwise(nr nftRule, idx int, dest bool) (err error) {
+	if idx+1 >= len(nr.Expr) {
+		err = fmt.Errorf("Index out of range %d", idx+1)
+		return
+	}
+
+	var ip net.IP
+	var mask net.IPMask
+
+	if mask, err = datareg2IP(nr.Expr[idx].Mask.DataReg); err != nil {
+		return
+	}
+	if ip, err = datareg2IP(nr.Expr[idx+1].DataReg); err != nil {
+		return
+	}
+
+	if dest {
+		r.DAddr.IP = ip
+		r.DAddr.Mask = mask
+	} else {
+		r.SAddr.IP = ip
+		r.SAddr.Mask = mask
+	}
+
+	return
+}
+
+// Return byte slice suitable for net.IP
+func datareg2IP(dr DataReg) (data []byte, err error) {
+	length := dr.Len
+
+	switch length {
+	// ip4
+	case 4:
+		if data, err = hex2bytes(dr.Data0); err != nil {
+			return
+		}
+	// ip6
+	case 16:
+		var tmp []byte
+		if tmp, err = hex2bytes(dr.Data0); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+		if tmp, err = hex2bytes(dr.Data1); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+		if tmp, err = hex2bytes(dr.Data2); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+		if tmp, err = hex2bytes(dr.Data3); err != nil {
+			return
+		}
+		data = append(data, tmp...)
+	}
+
+	return
+}
+
+// convert 32bit hex string to byte slice
+func hex2bytes(hex string) (b []byte, err error) {
+	var mask uint64
+	if hex == "" {
+		err = fmt.Errorf("hex string empty")
+		return
+	}
+	b = make([]byte, 4)
+	mask, err = strconv.ParseUint(hex, 0, 32)
+	if err != nil {
+		return
+	}
+
+	binary.LittleEndian.PutUint32(b, uint32(mask))
+	return
+}
+
+// process 'payload' expr
+func (r *Rule) processPayload(nr nftRule, idx int) (err error) {
+	var big uint64
+
+	if idx+1 >= len(nr.Expr) {
+		err = fmt.Errorf("Index out of range %d", idx+1)
+		return
+	}
+
+	switch nr.Expr[idx].Base {
+	case "network":
+
+		if nr.Expr[idx+1].Type == "bitwise" {
+			// src/dest address
+			var dest bool
+			if nr.Expr[idx].Offset == 16 {
+				dest = true
+			}
+			err = r.processBitwise(nr, idx+1, dest)
+			if err != nil {
+				return
+			}
+		} else {
+			// protocol e.g. tcp, udp
+			hex := nr.Expr[idx+1].DataReg.Data0
+			if hex == "" {
+				err = fmt.Errorf("Data0 empty")
+				return
+			}
+			length := nr.Expr[idx+1].DataReg.Len
+			big, err = strconv.ParseUint(hex, 0, length*8)
+			if err != nil {
+				return
+			}
+			r.Proto = int(big)
+		}
+	case "transport":
+		// src/dest port
+		hex := nr.Expr[idx+1].DataReg.Data0
+		if hex == "" {
+			err = fmt.Errorf("Data0 empty")
+			return
+		}
+
+		length := nr.Expr[idx+1].DataReg.Len
+		data := make([]byte, length)
+		big, err = strconv.ParseUint(hex, 0, length*8)
+		if err != nil {
+			return
+		}
+
+		binary.LittleEndian.PutUint16(data, uint16(big))
+
+		var port uint16
+		buf := bytes.NewBuffer(data)
+		binary.Read(buf, binary.BigEndian, &port)
+
+		switch nr.Expr[idx].Offset {
+		case 1:
+			r.SPort = int(port)
+		case 2:
+			r.DPort = int(port)
+		}
+	}
+	return
+}
+
+// process 'meta' expr e.g. network interfaces
+func (r *Rule) processMeta(nr nftRule, idx int) (err error) {
+	var iface uint64
+
+	if idx+1 >= len(nr.Expr) {
+		err = fmt.Errorf("Index out of range %d", idx+1)
+		return
+	}
+
+	length := nr.Expr[idx+1].DataReg.Len
+	hex := nr.Expr[idx+1].DataReg.Data0
+	if hex == "" {
+		err = fmt.Errorf("Data0 empty")
+		return
+	}
+	if iface, err = strconv.ParseUint(hex, 0, length*8); err != nil {
+		return
+	}
+
+	switch nr.Expr[idx].Key {
+	case "iif":
+		if r.IIf, err = net.InterfaceByIndex(int(iface)); err != nil {
+			return
+		}
+	case "oif":
+		if r.OIf, err = net.InterfaceByIndex(int(iface)); err != nil {
+			return
+		}
+	}
+	return
+}
+
+/*
 func (r Rule) String() string {
 	return fmt.Sprintf("%s %s %s %d %d", r.Family, r.Table, r.Chain)
 }
+*/
 
 /*
 func GetRules6(chain string) ([]*Rule, error) {
@@ -107,7 +367,7 @@ func GetRules6(chain string) ([]*Rule, error) {
 }
 */
 
-func getRules(chain, family string) (rules []nftRule, err error) {
+func getRules(table, chain, family string) (rules []nftRule, err error) {
 	var ok bool
 	var f, bufsize int
 	var cerr error
@@ -144,9 +404,6 @@ func getRules(chain, family string) (rules []nftRule, err error) {
 		return
 	}
 
-	cstring := C.CString(chain)
-	defer C.free(unsafe.Pointer(cstring))
-	C.nft_rule_attr_set(r, C.NFT_RULE_ATTR_CHAIN, unsafe.Pointer(cstring))
 	C.nft_rule_nlmsg_build_payload(nlh, r)
 
 	nl := C.mnl_socket_open(C.NETLINK_NETFILTER)
@@ -195,12 +452,22 @@ func getRules(chain, family string) (rules []nftRule, err error) {
 	}
 	C.mnl_socket_close(nl)
 
+	//filter out extraneous rules
+	var newRules []nftRule
+	for _, r := range rules {
+		if r.Table == table && r.Chain == chain {
+			newRules = append(newRules, r)
+		}
+	}
+
+	rules = newRules
+
 	return
 }
 
 func AddJson() (err error) {
 	var rules []nftRule
-	rules, err = getRules("input", "ip4")
+	rules, err = getRules("filter", "input", "ip4")
 
 	if len(rules) == 0 {
 		err = fmt.Errorf("no rules returned")
@@ -241,345 +508,3 @@ func AddJson() (err error) {
 
 	return
 }
-
-/* Manual rule add
-func (r *Rule) Add() (err error) {
-	var cerr error
-	var bufsize int
-	var n C.int
-	var sn C.ssize_t
-
-	// addSetup allocs r.rule
-	err = r.addSetup("tcp", 80)
-	if err != nil {
-		return
-	}
-	defer C.free(unsafe.Pointer(r.rule))
-
-	nl := C.mnl_socket_open(C.NETLINK_NETFILTER)
-	if nl == nil {
-		err = fmt.Errorf("mnl_socket_open")
-		return
-	}
-
-	if C.mnl_socket_bind(nl, 0, C.MNL_SOCKET_AUTOPID) < 0 {
-		err = fmt.Errorf("mnl_socket_bind")
-		return
-	}
-
-	seq := time.Time{}.Unix()
-
-	// The following const was not recognised from libmnl.h
-	// #define MNL_SOCKET_BUFFER_SIZE (getpagesize() < 8192L ? getpagesize() : 8192L)
-	if C.getpagesize() < 8192 {
-		bufsize = int(C.getpagesize())
-	} else {
-		bufsize = 8192
-	}
-	buf := make([]byte, bufsize)
-	batch := C.mnl_nlmsg_batch_start(
-		unsafe.Pointer(&buf[0]),
-		C.size_t(len(buf)),
-	)
-
-	seq++
-	batchPut(
-		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
-		uint16(C.NFNL_MSG_BATCH_BEGIN),
-		seq,
-	)
-
-	C.mnl_nlmsg_batch_next(batch)
-
-	seq++
-	nlh := C.nft_rule_nlmsg_build_hdr(
-		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
-		C.NFT_MSG_NEWRULE,
-		C.uint16_t(C.nft_rule_attr_get_u32(
-			r.rule,
-			C.NFT_RULE_ATTR_FAMILY,
-		)),
-		C.NLM_F_APPEND|C.NLM_F_CREATE|C.NLM_F_ACK,
-		C.uint32_t(seq),
-	)
-
-	C.nft_rule_nlmsg_build_payload(nlh, r.rule) //finished with r.rule, gets freed via defer
-	C.mnl_nlmsg_batch_next(batch)
-
-	seq++
-	batchPut(
-		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
-		uint16(C.NFNL_MSG_BATCH_END),
-		seq,
-	)
-	C.mnl_nlmsg_batch_next(batch)
-
-	sn, cerr = C.mnl_socket_sendto(
-		nl,
-		unsafe.Pointer(C.mnl_nlmsg_batch_head(batch)),
-		C.size_t(C.mnl_nlmsg_batch_size(batch)),
-	)
-	if sn == -1 {
-		err = fmt.Errorf("mnl_socket_sendto: err %s", cerr)
-		return
-	}
-
-	C.mnl_nlmsg_batch_stop(batch)
-
-	sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
-	if sn == -1 {
-		err = fmt.Errorf("mnl_socket_recvfrom")
-		return
-	}
-
-	portid := C.mnl_socket_get_portid(nl)
-
-	n, cerr = C.mnl_cb_run(
-		unsafe.Pointer(&buf[0]),
-		C.size_t(sn),
-		0,
-		portid,
-		nil,
-		nil,
-	)
-	if n == -1 {
-		err = fmt.Errorf("mnl_cb_run: err %s", cerr)
-		return
-	}
-
-	C.mnl_socket_close(nl)
-
-	return
-}
-
-func (r *Rule) addSetup(protoStr string, port int) (err error) {
-	if r.Table == "" || r.Chain == "" || r.Family == "" {
-		err = fmt.Errorf("table, chain, family missing. These must be set")
-		return
-	}
-
-	var proto C.uint8_t
-	var ok bool
-	if proto, ok = protoMap[protoStr]; !ok {
-		err = fmt.Errorf("unrecognised protocol %s", protoStr)
-		return
-	}
-	var cerr error
-
-	r.rule, cerr = C.nft_rule_alloc()
-	if r == nil {
-		err = fmt.Errorf("rule alloc failure: %s", cerr)
-		return
-	}
-
-	ctable := C.CString(r.Table)
-	defer C.free(unsafe.Pointer(ctable))
-	C.nft_rule_attr_set(
-		r.rule,
-		C.NFT_RULE_ATTR_TABLE,
-		unsafe.Pointer(ctable),
-	)
-	cchain := C.CString(r.Chain)
-	defer C.free(unsafe.Pointer(cchain))
-	C.nft_rule_attr_set(
-		r.rule,
-		C.NFT_RULE_ATTR_CHAIN,
-		unsafe.Pointer(cchain),
-	)
-
-	if f, ok := familyMap[r.Family]; ok {
-		C.nft_rule_attr_set_u32(
-			r.rule,
-			C.NFT_RULE_ATTR_FAMILY,
-			C.uint32_t(f),
-		)
-	} else {
-		err = fmt.Errorf("unrecognised family %s", r.Family)
-		return
-	}
-	if r.Handle > 0 {
-		C.nft_rule_attr_set_u64(
-			r.rule,
-			C.NFT_RULE_ATTR_POSITION,
-			C.uint64_t(r.Handle),
-		)
-	}
-
-	var iphdr C.struct_iphdr
-
-	err = r.addPayload(
-		int(C.NFT_PAYLOAD_NETWORK_HEADER),
-		int(C.NFT_REG_1),
-		unsafe.Offsetof(iphdr.protocol),
-		1, // sizeof(uint8_t)
-	)
-	if err != nil {
-		return
-	}
-
-	err = r.addCmp(
-		int(C.NFT_REG_1),
-		int(C.NFT_CMP_EQ),
-		&proto,
-		1, // sizeof(uint8_t)
-	)
-	if err != nil {
-		return
-	}
-
-	var tcphdr C.struct_tcphdr
-	dport := C.htons(C.uint16_t(port))
-	err = r.addPayload(
-		int(C.NFT_PAYLOAD_TRANSPORT_HEADER),
-		int(C.NFT_REG_1),
-		unsafe.Offsetof(tcphdr.dest),
-		2, // sizeof(uint16_t)
-	)
-	if err != nil {
-		return
-	}
-
-	err = r.addCmp(
-		int(C.NFT_REG_1),
-		int(C.NFT_CMP_EQ),
-		&dport,
-		2, // sizeof(uint16_t)
-	)
-	if err != nil {
-		return
-	}
-
-	err = r.addCounter()
-	if err != nil {
-		return
-	}
-
-	return
-}
-
-func (r *Rule) addCmp(sreg, op int, data interface{}, length uintptr) (err error) {
-	ccmp := C.CString("cmp")
-	defer C.free(unsafe.Pointer(ccmp))
-	// freed by libnftnl
-	e, cerr := C.nft_rule_expr_alloc(ccmp)
-	if e == nil {
-		err = fmt.Errorf("rule expr alloc failure: %s", cerr)
-		return
-	}
-
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_CMP_SREG,
-		C.uint32_t(sreg),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_CMP_OP,
-		C.uint32_t(op),
-	)
-
-	switch data.(type) {
-	case *C.uint8_t:
-		if proto, ok := data.(*C.uint8_t); ok {
-
-			C.nft_rule_expr_set(
-				e,
-				C.NFT_EXPR_CMP_DATA,
-				unsafe.Pointer(proto),
-				C.uint32_t(length),
-			)
-		} else {
-			err = fmt.Errorf("unable to assert *C.uint8_t")
-			return
-		}
-	case *C.uint16_t:
-		if port, ok := data.(*C.uint16_t); ok {
-
-			C.nft_rule_expr_set(
-				e,
-				C.NFT_EXPR_CMP_DATA,
-				unsafe.Pointer(port),
-				C.uint32_t(length),
-			)
-		} else {
-			err = fmt.Errorf("unable to assert *C.uint16_t")
-			return
-		}
-	}
-
-	C.nft_rule_add_expr(r.rule, e)
-
-	return
-}
-
-func (r *Rule) addPayload(base, dreg int, offset, length uintptr) (err error) {
-	cpayload := C.CString("payload")
-	defer C.free(unsafe.Pointer(cpayload))
-	// freed by libnftnl
-	e, cerr := C.nft_rule_expr_alloc(cpayload)
-	if e == nil {
-		err = fmt.Errorf("rule expr alloc failure: %s", cerr)
-		return
-	}
-
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_BASE,
-		C.uint32_t(base),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_DREG,
-		C.uint32_t(dreg),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_OFFSET,
-		C.uint32_t(offset),
-	)
-	C.nft_rule_expr_set_u32(
-		e,
-		C.NFT_EXPR_PAYLOAD_LEN,
-		C.uint32_t(length),
-	)
-
-	C.nft_rule_add_expr(r.rule, e)
-
-	return
-}
-
-func (r *Rule) addCounter() (err error) {
-	ccounter := C.CString("counter")
-	defer C.free(unsafe.Pointer(ccounter))
-	// freed by libnftnl
-	e, cerr := C.nft_rule_expr_alloc(ccounter)
-	if e == nil {
-		err = fmt.Errorf("rule expr alloc failure: %s", cerr)
-		return
-	}
-
-	C.nft_rule_add_expr(r.rule, e)
-
-	return
-}
-
-func batchPut(buf *C.char, msgType uint16, seq int64) {
-	nlh := C.mnl_nlmsg_put_header(
-		unsafe.Pointer(buf),
-	)
-	nlh.nlmsg_type = C.__u16(msgType)
-	nlh.nlmsg_flags = C.NLM_F_REQUEST
-	nlh.nlmsg_seq = C.__u32(seq)
-
-	var nfg *C.struct_nfgenmsg
-	nfg = (*C.struct_nfgenmsg)(
-		C.mnl_nlmsg_put_extra_header(
-			nlh,
-			C.size_t(unsafe.Sizeof(*nfg)),
-		),
-	)
-	nfg.nfgen_family = C.AF_INET
-	nfg.version = C.NFNETLINK_V0
-	nfg.res_id = C.NFNL_SUBSYS_NFTABLES
-}
-*/
