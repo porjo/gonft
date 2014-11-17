@@ -27,7 +27,7 @@ func main() {
 		}
 	}
 
-	table, err := nft.GetTable("filter", "ip6")
+	table, err := nft.GetTable("filter", "ip4")
 	if err != nil {
 		log.Fatalf("GetTable err %s", err)
 	}
@@ -36,7 +36,8 @@ func main() {
 
 	tcf := nft.TCF{}
 	tcf.Table.Name = "filter"
-	tcf.Chain.Name = "input"
+	//tcf.Chain.Name = "input"
+	tcf.Chain.Name = "output"
 	tcf.Family = "ip"
 
 	rules, err := tcf.GetRules()

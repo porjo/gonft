@@ -77,9 +77,9 @@ type expr struct {
 	Base   string `json:"base,omitempty"`
 
 	// Used by 'cmp'
-	Sreg    int      `json:"sreg,omitempty"`
-	Op      string   `json:"op,omitempty"`
-	DataReg *dataReg `json:"data_reg,omitempty"`
+	Sreg int    `json:"sreg,omitempty"`
+	Op   string `json:"op,omitempty"`
+	Data *data  `json:"data,omitempty"`
 
 	// Used by 'meta'
 	Key string `json:"key,omitempty"`
@@ -93,7 +93,11 @@ type expr struct {
 	Xor  *xor  `json:"xor,omitempty"`
 }
 
-type dataReg struct {
+type data struct {
+	Reg reg `json:"reg,omitempty"`
+}
+
+type reg struct {
 	Type    string `json:"type,omitempty"`
 	Len     int    `json:"len,omitempty"`
 	Data0   string `json:"data0,omitempty"`
@@ -104,11 +108,11 @@ type dataReg struct {
 }
 
 type mask struct {
-	DataReg dataReg `json:"data_reg,omitempty"`
+	Reg reg `json:"reg,omitempty"`
 }
 
 type xor struct {
-	DataReg dataReg `json:"data_reg,omitempty"`
+	Reg reg `json:"reg,omitempty"`
 }
 
 type Rule struct {
@@ -174,7 +178,7 @@ func rulesNft2Go(nrules []nftRule) (rules []Rule, err error) {
 					return
 				}
 			case "immediate":
-				r.Action = nr.Expr[i].DataReg.Verdict
+				r.Action = nr.Expr[i].Data.Reg.Verdict
 			}
 		}
 		rules = append(rules, *r)
@@ -282,19 +286,20 @@ func (nr *nftRule) processCmp(length int, data0, data1, data2, data3 string) (er
 	e.Sreg = 1
 	e.Op = "eq"
 
-	e.DataReg = &dataReg{}
-	e.DataReg.Len = length
-	e.DataReg.Type = "value"
-	e.DataReg.Data0 = data0
+	e.Data = &data{}
+	e.Data.Reg = reg{}
+	e.Data.Reg.Len = length
+	e.Data.Reg.Type = "value"
+	e.Data.Reg.Data0 = data0
 
 	if data1 != "" {
-		e.DataReg.Data1 = data1
+		e.Data.Reg.Data1 = data1
 	}
 	if data2 != "" {
-		e.DataReg.Data2 = data2
+		e.Data.Reg.Data2 = data2
 	}
 	if data3 != "" {
-		e.DataReg.Data3 = data3
+		e.Data.Reg.Data3 = data3
 	}
 	nr.Expr = append(nr.Expr, e)
 
@@ -360,7 +365,7 @@ func (nr *nftRule) processAddr(ipnet *net.IPNet, isDest bool) (err error) {
 	e.Mask = &mask{}
 	if is4 {
 		lint := binary.LittleEndian.Uint32(ipnet.Mask)
-		e.Mask.DataReg = dataReg{
+		e.Mask.Reg = reg{
 			Type:  "value",
 			Len:   4,
 			Data0: fmt.Sprintf("0x%08x", lint),
@@ -371,7 +376,7 @@ func (nr *nftRule) processAddr(ipnet *net.IPNet, isDest bool) (err error) {
 		lint1 := binary.LittleEndian.Uint32(ipnet.Mask[4:8])
 		lint2 := binary.LittleEndian.Uint32(ipnet.Mask[8:12])
 		lint3 := binary.LittleEndian.Uint32(ipnet.Mask[12:16])
-		e.Mask.DataReg = dataReg{
+		e.Mask.Reg = reg{
 			Type:  "value",
 			Len:   16,
 			Data0: fmt.Sprintf("0x%08x", lint0),
@@ -384,14 +389,14 @@ func (nr *nftRule) processAddr(ipnet *net.IPNet, isDest bool) (err error) {
 	e.Xor = &xor{}
 	if is4 {
 		e.Len = 4
-		e.Xor.DataReg = dataReg{
+		e.Xor.Reg = reg{
 			Type:  "value",
 			Len:   4,
 			Data0: "0x00000000",
 		}
 	} else {
 		e.Len = 16
-		e.Xor.DataReg = dataReg{
+		e.Xor.Reg = reg{
 			Type:  "value",
 			Len:   16,
 			Data0: "0x00000000",
@@ -436,10 +441,10 @@ func (r *Rule) processBitwise(nr nftRule, idx int, isDest bool) (err error) {
 	var ip net.IP
 	var mask net.IPMask
 
-	if mask, err = datareg2IP(&nr.Expr[idx].Mask.DataReg); err != nil {
+	if mask, err = reg2IP(nr.Expr[idx].Mask.Reg); err != nil {
 		return
 	}
-	if ip, err = datareg2IP(nr.Expr[idx+1].DataReg); err != nil {
+	if ip, err = reg2IP(nr.Expr[idx+1].Data.Reg); err != nil {
 		return
 	}
 
@@ -457,7 +462,7 @@ func (r *Rule) processBitwise(nr nftRule, idx int, isDest bool) (err error) {
 }
 
 // Return byte slice suitable for net.IP
-func datareg2IP(dr *dataReg) (data []byte, err error) {
+func reg2IP(dr reg) (data []byte, err error) {
 	length := dr.Len
 
 	switch length {
@@ -509,11 +514,12 @@ func hex32(hex string) (b []byte, err error) {
 
 // process 'payload' expr
 func (r *Rule) processPayload(nr nftRule, idx int) (err error) {
-
-	if idx+1 >= len(nr.Expr) {
-		err = fmt.Errorf("Index out of range %d", idx+1)
-		return
-	}
+	/*
+		if idx+1 >= len(nr.Expr) {
+			err = fmt.Errorf("Index out of range %d", idx+1)
+			return
+		}
+	*/
 
 	switch nr.Expr[idx].Base {
 	case "network":
@@ -530,7 +536,7 @@ func (r *Rule) processPayload(nr nftRule, idx int) (err error) {
 			}
 		} else {
 			// protocol e.g. tcp, udp
-			hex := nr.Expr[idx+1].DataReg.Data0
+			hex := nr.Expr[idx+1].Data.Reg.Data0
 			if hex == "" {
 				err = fmt.Errorf("Data0 empty")
 				return
@@ -543,7 +549,7 @@ func (r *Rule) processPayload(nr nftRule, idx int) (err error) {
 		}
 	case "transport":
 		// src/dest port
-		hex := nr.Expr[idx+1].DataReg.Data0
+		hex := nr.Expr[idx+1].Data.Reg.Data0
 		if hex == "" {
 			err = fmt.Errorf("Data0 empty")
 			return
@@ -556,7 +562,7 @@ func (r *Rule) processPayload(nr nftRule, idx int) (err error) {
 			return
 		}
 
-		length := nr.Expr[idx+1].DataReg.Len
+		length := nr.Expr[idx+1].Data.Reg.Len
 		data := make([]byte, length)
 
 		binary.BigEndian.PutUint16(data, uint16(bigend))
@@ -581,7 +587,7 @@ func (r *Rule) processMeta(nr nftRule, idx int) (err error) {
 		return
 	}
 
-	hex := nr.Expr[idx+1].DataReg.Data0
+	hex := nr.Expr[idx+1].Data.Reg.Data0
 	if hex == "" {
 		err = fmt.Errorf("Data0 empty")
 		return
@@ -725,9 +731,9 @@ func AddJson() (err error) {
 	rule := rules[0]
 
 	for i, _ := range rule.Expr {
-		if rule.Expr[i].DataReg != nil {
-			if rule.Expr[i].DataReg.Data0 == "0x00000006" { //tcp
-				rule.Expr[i].DataReg.Data0 = "0x00000011" //udp (hex)
+		if rule.Expr[i].Data != nil {
+			if rule.Expr[i].Data.Reg.Data0 == "0x00000006" { //tcp
+				rule.Expr[i].Data.Reg.Data0 = "0x00000011" //udp (hex)
 				rule.Handle = 16
 			}
 		}
@@ -786,7 +792,6 @@ func (rule *Rule) AddJson2() (err error) {
 	jrule := jsonRule{
 		Rule: nrule,
 	}
-	//buf, err = json.MarshalIndent(nrule, "", "  ")
 	buf, err = json.Marshal(jrule)
 
 	var parseErr *C.struct_nft_parse_err
@@ -803,8 +808,6 @@ func (rule *Rule) AddJson2() (err error) {
 		(*C.char)(unsafe.Pointer(&buf[0])),
 		parseErr,
 	)
-
-	fmt.Printf("nft_rule_parse r %v, n %d, \nbuf %s\n, parseErr %v, cerr %s\n", r, n, buf, parseErr, cerr)
 
 	C.nft_rule_attr_unset(r, C.NFT_RULE_ATTR_HANDLE)
 
@@ -829,7 +832,6 @@ func (rule *Rule) AddJson2() (err error) {
 		unsafe.Pointer(&buf[0]),
 		C.size_t(len(buf)),
 	)
-	fmt.Printf("after batch start\n")
 
 	if batching >= 0 {
 		seq++
@@ -839,7 +841,6 @@ func (rule *Rule) AddJson2() (err error) {
 		)
 		C.mnl_nlmsg_batch_next(batch)
 	}
-	fmt.Printf("after batch begin\n")
 
 	ruleSeq := seq
 
@@ -849,7 +850,7 @@ func (rule *Rule) AddJson2() (err error) {
 	)
 	seq++
 	nlh := C.nft_rule_nlmsg_build_hdr(
-		(*C.char)(unsafe.Pointer(&buf[0])),
+		(*C.char)(C.mnl_nlmsg_batch_current(batch)),
 		C.NFT_MSG_NEWRULE,
 		C.uint16_t(family),
 		C.NLM_F_CREATE|C.NLM_F_APPEND|C.NLM_F_ACK,
@@ -866,7 +867,6 @@ func (rule *Rule) AddJson2() (err error) {
 		)
 		C.mnl_nlmsg_batch_next(batch)
 	}
-	fmt.Printf("after batch end\n")
 
 	nl := C.mnl_socket_open(C.NETLINK_NETFILTER)
 	if nl == nil {
@@ -889,14 +889,12 @@ func (rule *Rule) AddJson2() (err error) {
 		return
 	}
 	C.mnl_nlmsg_batch_stop(batch)
-	fmt.Printf("after batch stop, sn %d portid %d seq %d ruleSeq %d batch size %d\n", sn, portid, seq, ruleSeq, C.mnl_nlmsg_batch_size(batch))
 
 	sn, cerr = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	if sn == -1 {
 		err = fmt.Errorf("mnl_socket_recvfrom: err %s", cerr)
 		return
 	}
-	fmt.Printf("after recv from\n")
 
 	for sn > 0 {
 		n, cerr = C.mnl_cb_run(
@@ -914,7 +912,6 @@ func (rule *Rule) AddJson2() (err error) {
 		sn = C.mnl_socket_recvfrom(nl, unsafe.Pointer(&buf[0]), C.size_t(len(buf)))
 	}
 
-	fmt.Printf("after cb run")
 	if n == -1 {
 		err = fmt.Errorf("mnl_cb_run: err %s", cerr)
 		return
