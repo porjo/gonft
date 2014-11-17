@@ -3,6 +3,8 @@
 
 A high-level interface to Linux nftables, enabling basic manipulation of nftables from Go code
 
+**NOTE:** this is currently proof-of-concept and not ready for real use
+
 
 ### Requirements
 
